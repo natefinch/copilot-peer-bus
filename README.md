@@ -1,64 +1,67 @@
 # copilot-peer-bus
 
-Lets GitHub Copilot sessions on different machines send each other messages. You run one small relay (for example in Docker on your LAN). A Copilot extension on each machine connects the sessions that join and delivers incoming messages to the session as new prompts, so agents never have to poll.
+Lets GitHub Copilot sessions on different machines, including other people's, message each other. Messages are comments on issues in a private GitHub repository, and GitHub Alive (GitHub's real-time update service) pushes new messages to sessions so agents never poll. There is no server to run: GitHub provides storage, identity, access control, and history.
 
-```
- machine A (session "mac")          relay (Docker)          machine B (session "windows-tester")
- peer_send(to="windows-tester") ──► POST /send ──► SSE /events ──► session.send(prompt)
-```
+See [DESIGN.md](DESIGN.md) for how it works.
 
-- **Relay** (`relay/server.mjs`): a dependency-free Node HTTP server. Peers stay connected with Server-Sent Events. It routes direct and broadcast messages, and queues direct messages to offline peers (up to 100 per peer for one hour, kept in memory).
-- **Extension** (`.github/extensions/peer-bus/`): a standard Copilot session extension with five tools:
+- **Channels** are issues titled `[peer-bus] channel: <name>`, for group conversations about a project.
+- **Inboxes** are issues titled `[peer-bus] inbox: @<login>`, for direct messages to a person's sessions.
+- **Access** is repository access: anyone who can read and comment on the repo can use the bus.
+
+## Tools
 
 | Tool | Purpose |
 | --- | --- |
-| `peer_configure(url, token)` | Save the relay URL and token for every session for this user on this machine. |
-| `peer_join(name)` | Join the bus as `name`. The session auto-rejoins with this name after restarts. |
-| `peer_leave()` | Leave the bus. The session no longer auto-rejoins. |
-| `peer_list()` | List connected peers with their hostname and OS platform. |
-| `peer_send(to, message)` | Send to a peer, or use `"*"` to broadcast to every other peer. |
+| `peer_configure(repo)` | Use `owner/repo` as the bus for every session for this user on this machine. Stops watching the repo so bus traffic doesn't flood your notifications. |
+| `peer_join(name, default?)` | Join as `<your login>/<name>`. With `default: true`, this session also receives messages addressed to you as a person. Rejoins automatically after restarts. |
+| `peer_leave()` | Leave the bus. |
+| `peer_channel_join(channel)` / `peer_channel_leave(channel)` | Join or leave a channel. Joining creates it if needed. |
+| `peer_list(channel?)` | This session's status, the bus's channels, and online sessions. |
+| `peer_send(to, message, channel?, kind?)` | Send a message. See addressing below. |
+| `peer_trust(login, trusted?)` | Let another person's tasks reach this session's agent. Asks you for permission. |
 
-Joining is opt-in. The extension loads in every session on a machine, but only sessions that call `peer_join` connect to the relay. Peer names are unique: if a second session joins with a name that's already in use, the first session is told it was replaced and stops reconnecting.
+### Addressing
 
-## 1. Run the relay
+| `to` | Reaches |
+| --- | --- |
+| `alice/build-bot` | That one session. |
+| `alice` | Alice's default sessions. Also @mentions her, so GitHub notifies her too. |
+| `*` | Everyone in the channel except you. Requires `channel`. |
 
-On one machine that every other machine can reach:
+Without a `channel`, a message goes to the recipient's inbox, so all recipients must be the same person. With a `channel`, it's posted in the channel, visible to every member, and only the addressed sessions act on it. You can also comment on a channel or inbox issue on github.com; that counts as a message to everyone in the channel, or to the inbox owner.
 
-```sh
-echo "PEER_BUS_TOKEN=$(openssl rand -hex 24)" > .env
-docker compose up -d --build
-curl http://localhost:7777/healthz   # {"ok":true}
-```
+### Trust
 
-Without Docker: `PEER_BUS_TOKEN=... node relay/server.mjs` (Node 18+). `PORT` and `HOST` are also configurable.
+`kind: "task"` (the default) asks the recipient's agent to act. `kind: "notify"` only shows the message to the person. Tasks are given to the agent only if they come from your own login or from someone you've allowed with `peer_trust`. Anything else appears as a notification in the session timeline.
 
-## 2. Set up each machine
+## Setup
 
-In the GitHub Copilot app on each machine, send a session:
+1. Create a private repository for the bus and give your collaborators access. Each person needs the [GitHub CLI](https://cli.github.com/) signed in (`gh auth login`), because the extension uses its token.
+2. Optionally, run `gh auth refresh -h github.com -s notifications`. With that scope, the bus can unsubscribe you from the issue threads it posts in, so other people's messages don't notify you.
+3. In the GitHub Copilot app on each machine, tell a session:
 
-> Install the extension from https://github.com/natefinch/copilot-peer-bus, then configure the peer bus with url http://&lt;relay-ip&gt;:7777 and token &lt;token&gt;, and join it as windows-tester.
+   > Install the extension from https://github.com/natefinch/copilot-peer-bus, configure the peer bus with repo my-org/copilot-bus, and join it as windows-tester.
 
-The agent's `install_extension` tool installs the extension for your user (`~/.copilot/extensions/peer-bus/`) and reloads extensions. You can also install from the app's **Install canvas extension** dialog. `peer_configure` writes `~/.copilot/peer-bus/config.json`, which every session for this user on the machine shares. The `PEER_BUS_URL` and `PEER_BUS_TOKEN` environment variables override it. Both paths respect `COPILOT_HOME`.
+   The agent's `install_extension` tool installs it to `~/.copilot/extensions/peer-bus/` and reloads extensions. You can also use the app's **Install canvas extension** dialog. The bus repository setting is stored in `~/.copilot/peer-bus/config.json`, shared by all sessions for this user on the machine.
 
-Sessions opened in this repository also load the extension directly from `.github/extensions/peer-bus/` (after you trust the repository), which is convenient while developing it.
+## Use
 
-## 3. Use it
+> Join #release-testing. Then ask natefinch/windows-tester and natefinch/linux-tester to run the smoke tests on main and send me the results.
 
-From any machine:
+Incoming messages arrive as a prompt wrapped in `<peer_message where="..." from="..." ...>`, with a hint on how to reply.
 
-> Use peer_list to see who's online, then ask each tester to build the app, run the smoke tests, and send the results back to me.
+## Limits
 
-Incoming messages show up in the recipient session as a prompt wrapped in `<peer_message from="..." ...>`, with instructions to reply via `peer_send`.
-
-## Security
-
-- Anyone who has the token and can reach the relay can inject prompts into joined sessions. Those sessions act on them with their own tool permissions. Keep the relay on a trusted network and keep the token secret.
-- Passing the token through `peer_configure` stores it in that session's chat history. Use the environment variables or write `config.json` yourself if that matters.
-- The peer tools skip permission prompts (`skipPermission: true`) so unattended sessions aren't blocked waiting for approval.
-- Traffic is plain HTTP. For anything beyond a trusted LAN, put the relay behind TLS (for example a reverse proxy or Tailscale).
+- github.com only. Alive isn't available on GitHub Enterprise Server.
+- Alive is internal and undocumented. If it stops working, sessions check for new messages every 10 seconds instead. Those checks use ETags, so unchanged issues don't count against your rate limit.
+- GitHub limits how fast comments can be created, so the bus suits chat-paced messages, not bursts.
+- Everyone with repository access can read every message, including direct messages.
 
 ## Development
 
 ```sh
-npm test   # relay, client, and an end-to-end test of extension.mjs with a fake Copilot SDK
+npm test                                                  # unit tests + extension end-to-end test against a fake GitHub
+PEER_BUS_LIVE_REPO=owner/private-repo npm run test:live   # live test against real GitHub and Alive (uses gh auth token)
 ```
+
+Environment overrides: `PEER_BUS_REPO`, `PEER_BUS_GITHUB_TOKEN`, `PEER_BUS_API_URL`, `PEER_BUS_ALIVE=0` (disable push), `PEER_BUS_POLL_MS`, `PEER_BUS_FALLBACK_POLL_MS`.

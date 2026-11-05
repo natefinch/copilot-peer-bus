@@ -6,30 +6,26 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, test } from "node:test";
 
-import { createRelay } from "../relay/server.mjs";
+import { createFakeGitHub } from "./fixtures/fake-github.mjs";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const TOKEN = "e2e-token";
-
-let relay;
-let url;
+let fake;
 let home;
 const children = [];
 
 beforeEach(async () => {
-    relay = createRelay({ token: TOKEN });
-    await new Promise((resolve) => relay.listen(0, "127.0.0.1", resolve));
-    url = `http://127.0.0.1:${relay.address().port}`;
+    fake = createFakeGitHub();
+    await fake.listen();
     home = mkdtempSync(path.join(os.tmpdir(), "peer-bus-ext-"));
 });
 
 afterEach(async () => {
     for (const child of children.splice(0)) child.kill();
-    await new Promise((resolve) => relay.close(resolve));
+    await fake.close();
     rmSync(home, { recursive: true, force: true });
 });
 
-function waitFor(predicate, timeoutMs = 3000) {
+function waitFor(predicate, timeoutMs = 5000) {
     return new Promise((resolve, reject) => {
         const started = Date.now();
         const tick = () => {
@@ -42,15 +38,19 @@ function waitFor(predicate, timeoutMs = 3000) {
     });
 }
 
-function cleanEnv() {
-    const { PEER_BUS_URL: _url, PEER_BUS_TOKEN: _token, ...env } = process.env;
-    return env;
-}
-
-async function launchExtension(sessionId) {
+async function launchExtension(sessionId, login) {
+    const { PEER_BUS_REPO: _r, PEER_BUS_GITHUB_TOKEN: _t, ...baseEnv } = process.env;
     const child = fork(path.join(root, ".github", "extensions", "peer-bus", "extension.mjs"), {
         execArgv: ["--import", path.join(root, "test", "fixtures", "register-fake-sdk.mjs")],
-        env: { ...cleanEnv(), SESSION_ID: sessionId, COPILOT_HOME: home },
+        env: {
+            ...baseEnv,
+            SESSION_ID: sessionId,
+            COPILOT_HOME: home,
+            PEER_BUS_API_URL: fake.url,
+            PEER_BUS_GITHUB_TOKEN: `tok-${login}`,
+            PEER_BUS_ALIVE: "0",
+            PEER_BUS_FALLBACK_POLL_MS: "100",
+        },
         stdio: ["ignore", "inherit", "inherit", "ipc"],
     });
     children.push(child);
@@ -68,56 +68,60 @@ async function launchExtension(sessionId) {
         }
     });
     await waitFor(() => events.some((e) => e.type === "joined"));
-    const call = (tool, args) =>
+    const call = (tool, args = {}) =>
         new Promise((resolve, reject) => {
             const callId = nextCall++;
             pending.set(callId, { resolve, reject });
             child.send({ callId, tool, args });
         });
     const prompts = () => events.filter((e) => e.type === "prompt").map((e) => e.prompt);
-    const logs = () => events.filter((e) => e.type === "log").map((e) => e.message);
-    return { child, call, prompts, logs, events };
+    return { child, call, prompts, events };
 }
 
-test("two extension instances exchange messages, and a session rejoins after restart", async () => {
-    const mac = await launchExtension("session-mac");
-    const win = await launchExtension("session-win");
+test("extension: configure, join, message across sessions, and rejoin after restart", async () => {
+    const mac = await launchExtension("session-mac", "natefinch");
+    const win = await launchExtension("session-win", "natefinch");
     assert.deepEqual(mac.events.find((e) => e.type === "joined").tools, [
         "peer_configure",
         "peer_join",
         "peer_leave",
+        "peer_channel_join",
+        "peer_channel_leave",
         "peer_list",
         "peer_send",
+        "peer_trust",
     ]);
 
-    await assert.rejects(mac.call("peer_send", { to: "win", message: "x" }), /not joined/);
     await assert.rejects(mac.call("peer_join", { name: "mac" }), /peer_configure/);
-    await assert.rejects(mac.call("peer_configure", { url: "ftp://x", token: TOKEN }), /http or https/);
-    // Configuration is per machine, so configuring in one session applies to the other session too.
-    assert.match(await mac.call("peer_configure", { url, token: TOKEN }), /relay is reachable/);
-    await mac.call("peer_join", { name: "mac" });
+    assert.match(await mac.call("peer_configure", { repo: fake.repo }), /Configured the peer bus on acme\/bus \(private\) as natefinch\. Stopped watching/);
+    assert.deepEqual(fake.unwatched, ["natefinch"]);
+    await win.call("peer_configure", { repo: fake.repo });
+
+    assert.match(await mac.call("peer_join", { name: "mac", default: true }), /Joined the peer bus as natefinch\/mac \(default session\)/);
     await win.call("peer_join", { name: "win" });
-    await waitFor(() => win.logs().some((line) => line.includes('connected as "win"')));
+    assert.match(await win.call("peer_channel_join", { channel: "release" }), /Created and joined #release/);
 
-    const list = await mac.call("peer_list", {});
-    assert.match(list, /- mac \(this session\)/);
-    assert.match(list, /- win: host=/);
+    const list = await mac.call("peer_list");
+    assert.match(list, /This session: natefinch\/mac \(default\) · push polling/);
+    assert.match(list, /- natefinch\/win: natefinch-host|- natefinch\/win: .*· #release/);
 
-    assert.match(await mac.call("peer_send", { to: "win", message: "please run the test suite" }), /Delivered to win/);
+    assert.match(
+        await mac.call("peer_send", { to: "natefinch/win", message: "please run the test suite" }),
+        /^Sent: https:\/\/github\.com\/acme\/bus\/issues\/\d+#issuecomment-\d+$/
+    );
     await waitFor(() => win.prompts().length === 1);
-    assert.match(win.prompts()[0], /<peer_message from="mac" to="win"/);
-    assert.match(win.prompts()[0], /please run the test suite/);
+    assert.match(win.prompts()[0], /from="natefinch\/mac" to="natefinch\/win"[\s\S]*please run the test suite/);
 
-    // Simulate an app restart / CLI reload: the extension process exits and a new one starts for the same session.
+    assert.match(await win.call("peer_send", { to: "natefinch", message: "done, all green" }), /^Sent:/);
+    await waitFor(() => mac.prompts().length === 1);
+
     win.child.kill();
     await new Promise((resolve) => win.child.once("exit", resolve));
-    assert.match(await mac.call("peer_send", { to: "win", message: "sent while offline" }), /queued/);
-
-    const winAgain = await launchExtension("session-win");
+    await mac.call("peer_send", { to: "natefinch/win", message: "sent while you were away" });
+    const winAgain = await launchExtension("session-win", "natefinch");
     await waitFor(() => winAgain.prompts().length === 1);
-    assert.match(winAgain.prompts()[0], /sent while offline/);
+    assert.match(winAgain.prompts()[0], /sent while you were away/);
 
-    assert.match(await winAgain.call("peer_leave", {}), /Left the peer bus/);
-    const afterLeave = await mac.call("peer_list", {});
-    assert.doesNotMatch(afterLeave, /- win/);
+    assert.match(await winAgain.call("peer_leave"), /Left the peer bus \(was natefinch\/win\)/);
+    assert.doesNotMatch(await mac.call("peer_list"), /natefinch\/win/);
 });
