@@ -196,7 +196,7 @@ const tools = [
                 self,
                 "Channels:",
                 ...(channels.length ? channels.map((c) => `- ${c.label}: ${c.online} online`) : ["- none"]),
-                `Online sessions${channel ? ` in #${channel}` : ""}:`,
+                `Online sessions${channel ? ` in ${channel}` : ""}:`,
                 ...(lines.length ? lines : ["- none"]),
             ].join("\n");
         },
