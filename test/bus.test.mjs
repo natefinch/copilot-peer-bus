@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, test } from "node:test";
 
 import { PeerBus } from "../.github/extensions/peer-bus/bus.mjs";
 import { GitHub } from "../.github/extensions/peer-bus/github.mjs";
+import { issueKey } from "../.github/extensions/peer-bus/protocol.mjs";
 import { SessionStore, sessionHash } from "../.github/extensions/peer-bus/state.mjs";
 import { FakeAlive, createFakeGitHub } from "./fixtures/fake-github.mjs";
 
@@ -85,7 +86,7 @@ describe("direct messages", () => {
         const inboxes = fake.issues.filter((i) => i.title === "[peer-bus] inbox: @natefinch");
         assert.equal(inboxes.length, 1, "sessions joining back to back share one inbox");
         assert.equal(inboxes[0].author, "natefinch");
-        assert.ok(fake.unsubscribed.some((u) => u.id === `I_${inboxes[0].number}`), "unsubscribes from the inbox thread");
+        assert.ok(fake.unsubscribed.some((u) => u.id === `I_acme/bus_${inboxes[0].number}`), "unsubscribes from the inbox thread");
         assert.equal(mac.bus.notificationHint(), null);
     });
 
@@ -160,8 +161,9 @@ describe("channels", () => {
         await mac.bus.send({ to: "*", channel: "release", message: "cutting the release" });
         await waitFor(() => win.prompts.length === 1 && alice.notes.length === 1);
         await settle();
-        assert.match(win.prompts[0], /where="#release"/);
-        assert.match(win.prompts[0], /peer_send with channel="release" and to="natefinch\/mac"/);
+        const channelIssue = fake.issues.find((i) => i.title === "[peer-bus] channel: release");
+        assert.match(win.prompts[0], new RegExp(`where="#release \\(acme/bus#${channelIssue.number}\\)"`));
+        assert.match(win.prompts[0], new RegExp(`peer_send with channel="acme/bus#${channelIssue.number}" and to="natefinch/mac"`));
         assert.equal(mac.prompts.length + outsider.prompts.length + outsider.notes.length + alice.prompts.length, 0);
 
         const channel = fake.issues.find((i) => i.title === "[peer-bus] channel: release");
@@ -174,6 +176,93 @@ describe("channels", () => {
         await waitFor(() => win.prompts.length === 3);
         await settle();
         assert.equal(alice.notes.length, 2);
+    });
+
+    test("any issue can be a channel: join by URL, send by key, leave by ref", async () => {
+        await fake.close();
+        fake = createFakeGitHub({ repos: { "Acme/App": {} } });
+        await fake.listen();
+        const work = fake.addIssue("alice", "Windows smoke tests for 1.4", "", "Acme/App");
+        const mac = await joined("natefinch", "mac");
+        const win = await joined("natefinch", "win");
+
+        const viaUrl = await mac.bus.joinChannel(`${work.html_url}#issuecomment-1`);
+        assert.deepEqual([viaUrl.repo, viaUrl.number, viaUrl.created, viaUrl.already], ["Acme/App", work.number, false, false]);
+        assert.equal(viaUrl.label, `acme/app#${work.number} "Windows smoke tests for 1.4"`);
+        assert.equal((await win.bus.joinChannel(`acme/app#${work.number}`)).already, false);
+        assert.equal((await win.bus.joinChannel(work.html_url)).already, true);
+
+        await mac.bus.send({ to: "*", channel: `acme/app#${work.number}`, message: "run them on windows" });
+        await waitFor(() => win.prompts.length === 1);
+        assert.match(win.prompts[0], /where="acme\/app#\d+ &quot;Windows smoke tests for 1\.4&quot;"/);
+        assert.match(win.prompts[0], new RegExp(`channel="acme/app#${work.number}"`));
+        assert.equal(fake.comments.at(-1).repo, "Acme/App");
+
+        const { sessions: inChannel } = await mac.bus.list({ channel: work.html_url });
+        assert.deepEqual(inChannel.map((s) => s.session).sort(), ["mac", "win"]);
+
+        assert.match(await win.bus.leaveChannel(`Acme/App#${work.number}`), /Windows smoke tests/);
+        assert.equal(await win.bus.leaveChannel(`Acme/App#${work.number}`), null);
+        await mac.bus.send({ to: "*", channel: work.html_url, message: "after win left" });
+        await settle();
+        assert.equal(win.prompts.length, 1);
+    });
+
+    test("a restarted session rejoins issue channels", async () => {
+        await fake.close();
+        fake = createFakeGitHub({ repos: { "acme/app": {} } });
+        await fake.listen();
+        const work = fake.addIssue("natefinch", "Release coordination", "", "acme/app");
+        const mac = await joined("natefinch", "mac");
+        const win = await joined("natefinch", "win", "win-session");
+        await win.bus.joinChannel(work.html_url);
+        win.bus.stop();
+        await mac.bus.send({ to: "natefinch/win", channel: work.html_url, message: "while you were away" });
+
+        const restarted = makeSession("natefinch", "win-session");
+        await restarted.bus.start();
+        await waitFor(() => restarted.prompts.length === 1);
+        assert.match(restarted.prompts[0], /while you were away/);
+        assert.deepEqual(restarted.bus.status().channels, [`acme/app#${work.number} "Release coordination"`]);
+    });
+
+    test("peer_channel_create makes a linked channel issue and joins it", async () => {
+        await fake.close();
+        fake = createFakeGitHub({ repos: { "acme/app": {}, "acme/secret": { members: ["alice"] } } });
+        await fake.listen();
+        const bug = fake.addIssue("alice", "Crash on startup", "", "acme/app");
+        const mac = await joined("natefinch", "mac");
+
+        const inBus = await mac.bus.createChannel({ title: "Startup crash: repro on all OSes", about: bug.html_url });
+        assert.equal(inBus.inBusRepo, true);
+        const created = fake.issues.find((i) => i.title === "Startup crash: repro on all OSes");
+        assert.equal(created.repo, "acme/bus");
+        assert.match(created.body, new RegExp(`Related: ${bug.html_url}`));
+        assert.deepEqual(mac.bus.status().channels, [`acme/bus#${created.number} "Startup crash: repro on all OSes"`]);
+
+        const inApp = await mac.bus.createChannel({ title: "Agents: crash triage", repo: "acme/app" });
+        assert.equal(inApp.inBusRepo, false);
+        assert.equal(fake.issues.find((i) => i.title === "Agents: crash triage").repo, "acme/app");
+
+        await assert.rejects(mac.bus.createChannel({ title: "x", repo: "acme/secret" }), /Can't create an issue in acme\/secret/);
+        await assert.rejects(mac.bus.createChannel({ title: "[peer-bus] inbox: @natefinch" }), /reserved/);
+        await assert.rejects(mac.bus.createChannel({ title: "x", about: "see the crash bug" }), /isn't an issue or pull request reference/);
+    });
+
+    test("channel joins reject inaccessible issues, pull requests, and inboxes", async () => {
+        await fake.close();
+        fake = createFakeGitHub({ repos: { "acme/secret": { members: ["alice"] }, "acme/app": {} } });
+        await fake.listen();
+        const secret = fake.addIssue("alice", "secret plans", "", "acme/secret");
+        const pull = fake.addIssue("natefinch", "a PR", "", "acme/app", { pull: true });
+        const mac = await joined("natefinch", "mac");
+        await assert.rejects(mac.bus.joinChannel(secret.html_url), /Can't access acme\/secret#1/);
+        await assert.rejects(mac.bus.joinChannel(`acme/app#${pull.number}`), /is a pull request/);
+        await assert.rejects(mac.bus.joinChannel("https://github.com/acme/app/pull/1"), /Pull requests can't be channels/);
+        const inbox = fake.issues.find((i) => i.title === "[peer-bus] inbox: @natefinch");
+        await assert.rejects(mac.bus.joinChannel(`#${inbox.number}`), /personal inbox/);
+        await assert.rejects(mac.bus.send({ to: "*", channel: secret.html_url, message: "x" }), /Can't access/);
+        assert.deepEqual(mac.bus.status().channels, []);
     });
 
     test("addressed channel messages only wake the addressee", async () => {
@@ -205,11 +294,12 @@ describe("presence and lifecycle", () => {
         const alice = await joined("alice", "build");
         await alice.bus.joinChannel("release");
         const { channels, sessions: online } = await mac.bus.list();
-        assert.deepEqual(channels, ["release"]);
+        const key = issueKey(fake.issues.find((i) => i.title === "[peer-bus] channel: release"));
+        assert.deepEqual(channels, [{ id: key, label: `#release (${key})`, online: 1 }]);
         assert.deepEqual(
-            online.map((s) => [`${s.login}/${s.session}`, s.isDefault, s.channels, s.host]),
+            online.map((s) => [`${s.login}/${s.session}`, s.isDefault, s.channels.map((c) => c.id), s.host]),
             [
-                ["alice/build", false, ["release"], "alice-host"],
+                ["alice/build", false, [key], "alice-host"],
                 ["natefinch/mac", true, [], "natefinch-host"],
             ]
         );
@@ -262,8 +352,9 @@ test("GitHub client paginates and reuses ETags", async () => {
     const github = new GitHub({ repo: fake.repo, tokenProvider: async () => "tok-alice", apiUrl: fake.url });
     const issue = fake.addIssue("alice", "x");
     for (let i = 0; i < 150; i++) fake.addComment("alice", issue.number, `c${i}`);
-    assert.equal((await github.listComments(issue.number)).length, 150);
+    const ref = { repo: fake.repo, number: issue.number };
+    assert.equal((await github.listComments(ref)).length, 150);
     const before = fake.stats.notModified;
-    assert.equal((await github.listComments(issue.number)).length, 150);
+    assert.equal((await github.listComments(ref)).length, 150);
     assert.equal(fake.stats.notModified - before, 2, "both pages returned 304");
 });

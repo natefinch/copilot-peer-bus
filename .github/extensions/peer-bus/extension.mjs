@@ -8,7 +8,7 @@ import { joinSession } from "@github/copilot-sdk/extension";
 import { AliveWatcher } from "./alive.mjs";
 import { PeerBus } from "./bus.mjs";
 import { GitHub } from "./github.mjs";
-import { CHANNEL_NAME, SESSION_NAME } from "./protocol.mjs";
+import { SESSION_NAME, issueKey } from "./protocol.mjs";
 import { SessionStore, loadConfig, saveConfig, sessionHash } from "./state.mjs";
 
 const env = process.env;
@@ -44,7 +44,6 @@ function requireBus() {
     return bus;
 }
 
-const channelList = (channels) => channels.map((c) => `#${c}`).join(", ");
 
 const tools = [
     {
@@ -101,7 +100,7 @@ const tools = [
             const status = bus.status();
             return (
                 `Joined the peer bus as ${login}/${name}${isDefault ? " (default session)" : ""}. Inbox: ${inboxUrl}. ` +
-                `Push: ${status.push}. Channels: ${channelList(status.channels) || "none (use peer_channel_join)"}. ` +
+                `Push: ${status.push}. Channels: ${status.channels.join(", ") || "none (use peer_channel_join or peer_channel_create)"}. ` +
                 "Messages from trusted senders arrive as new prompts; others appear as notifications." +
                 (bus.notificationHint() ? ` ${bus.notificationHint()}` : "")
             );
@@ -119,30 +118,66 @@ const tools = [
     },
     {
         name: "peer_channel_join",
-        description: "Join a peer-bus channel, creating it if needed. Channel messages addressed to this session or to * arrive here.",
+        description:
+            "Join a peer-bus channel. A channel is a GitHub issue: pass its URL (e.g. https://github.com/acme/app/issues/123), " +
+            "owner/repo#123, #123 for an issue in the bus repo, or a channel name in the bus repo (created if missing). " +
+            "Channel messages addressed to this session or to * arrive here.",
         parameters: {
             type: "object",
-            properties: { channel: { type: "string", description: "Lowercase channel name, e.g. release-testing", pattern: CHANNEL_NAME.source } },
+            properties: { channel: { type: "string", description: "Issue URL, owner/repo#123, #123, or channel name." } },
             required: ["channel"],
         },
         skipPermission: true,
         handler: async ({ channel }) => {
             const result = await requireBus().joinChannel(channel);
-            if (result.already) return `Already in #${channel}.`;
-            return `${result.created ? "Created and joined" : "Joined"} #${channel}: ${result.url}`;
+            if (result.already) return `Already in ${result.label}.`;
+            const closed = result.state === "closed" ? " Note: the issue is closed." : "";
+            return `${result.created ? "Created and joined" : "Joined"} ${result.label}: ${result.html_url}.${closed} Use channel="${issueKey(result)}" with peer_send.`;
+        },
+    },
+    {
+        name: "peer_channel_create",
+        description:
+            "Create a new GitHub issue to use as a peer-bus channel and join it. Returns the URL to share; other sessions join with " +
+            "peer_channel_join. Prefer a new channel issue over an existing work issue, so agent traffic doesn't clutter it, and pass " +
+            "`about` to link the related issue or pull request. Created in the bus repository unless `repo` is given.",
+        parameters: {
+            type: "object",
+            properties: {
+                title: { type: "string", description: "Channel issue title, e.g. 'Windows smoke tests for 1.4'" },
+                about: { type: "string", description: "Related issue or pull request URL (or owner/repo#123) to link." },
+                repo: { type: "string", description: "Repository (owner/name) to create the issue in. Defaults to the bus repository." },
+            },
+            required: ["title"],
+        },
+        skipPermission: true,
+        handler: async ({ title, about, repo }) => {
+            const result = await requireBus().createChannel({ title, about, repo });
+            const watchers = result.inBusRepo
+                ? ""
+                : ` Comments on it notify people watching ${result.repo}; the bus repository avoids that.`;
+            return `Created and joined ${result.label}. Share this URL so other sessions can join: ${result.html_url}.${watchers}`;
         },
     },
     {
         name: "peer_channel_leave",
-        description: "Leave a peer-bus channel.",
+        description: "Leave a peer-bus channel (issue URL, owner/repo#123, #123, or channel name).",
         parameters: { type: "object", properties: { channel: { type: "string" } }, required: ["channel"] },
         skipPermission: true,
-        handler: async ({ channel }) => ((await requireBus().leaveChannel(channel)) ? `Left #${channel}.` : `Not in #${channel}.`),
+        handler: async ({ channel }) => {
+            const left = await requireBus().leaveChannel(channel);
+            return left ? `Left ${left}.` : `Not in ${channel}.`;
+        },
     },
     {
         name: "peer_list",
-        description: "Show this session's peer-bus status, the bus's channels, and online sessions (optionally only those in one channel).",
-        parameters: { type: "object", properties: { channel: { type: "string", description: "Only show sessions in this channel." } } },
+        description:
+            "Show this session's peer-bus status, known channels (named channels in the bus repo and channels online sessions are in), " +
+            "and online sessions, optionally only those in one channel.",
+        parameters: {
+            type: "object",
+            properties: { channel: { type: "string", description: "Only show sessions in this channel (issue URL, owner/repo#123, #123, or name)." } },
+        },
         skipPermission: true,
         defer: "never",
         handler: async ({ channel } = {}) => {
@@ -150,16 +185,17 @@ const tools = [
             const status = current.status();
             const { channels, sessions } = await current.list({ channel });
             const self = status
-                ? `This session: ${status.address}${status.isDefault ? " (default)" : ""} · push ${status.push} · channels: ${channelList(status.channels) || "none"} · trusted: ${status.trusted.join(", ") || "only yourself"}`
+                ? `This session: ${status.address}${status.isDefault ? " (default)" : ""} · push ${status.push} · channels: ${status.channels.join(", ") || "none"} · trusted: ${status.trusted.join(", ") || "only yourself"}`
                 : "This session hasn't joined the peer bus.";
             const lines = sessions.map((s) => {
                 const isSelf = status && `${s.login}/${s.session}`.toLowerCase() === status.address.toLowerCase();
                 const tags = [isSelf && "this session", s.isDefault && "default"].filter(Boolean).join(", ");
-                return `- ${s.login}/${s.session}${tags ? ` (${tags})` : ""}: ${s.host || "?"}, ${s.platform || "?"} · ${channelList(s.channels) || "no channels"}`;
+                return `- ${s.login}/${s.session}${tags ? ` (${tags})` : ""}: ${s.host || "?"}, ${s.platform || "?"} · ${s.channels.map((c) => c.id).join(", ") || "no channels"}`;
             });
             return [
                 self,
-                `Channels: ${channelList(channels) || "none"}`,
+                "Channels:",
+                ...(channels.length ? channels.map((c) => `- ${c.label}: ${c.online} online`) : ["- none"]),
                 `Online sessions${channel ? ` in #${channel}` : ""}:`,
                 ...(lines.length ? lines : ["- none"]),
             ].join("\n");
@@ -176,7 +212,7 @@ const tools = [
             properties: {
                 to: { type: "string", description: "Recipient address; separate multiple addresses with commas." },
                 message: { type: "string", description: "Self-contained message text." },
-                channel: { type: "string", description: "Channel to post in. Omit for a direct message." },
+                channel: { type: "string", description: "Channel to post in (issue URL, owner/repo#123, #123, or name). Omit for a direct message." },
                 kind: { type: "string", enum: ["task", "notify"], description: "Default task." },
             },
             required: ["to", "message"],

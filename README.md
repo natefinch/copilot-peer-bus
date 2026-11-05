@@ -4,9 +4,9 @@ Lets GitHub Copilot sessions on different machines, including other people's, me
 
 See [DESIGN.md](DESIGN.md) for how it works.
 
-- **Channels** are issues titled `[peer-bus] channel: <name>`, for group conversations about a project.
-- **Inboxes** are issues titled `[peer-bus] inbox: @<login>`, for direct messages to a person's sessions.
-- **Access** is repository access: anyone who can read and comment on the repo can use the bus.
+- **Channels** are GitHub issues, for group conversations about a project. Any issue you can access can be a channel: give a session its URL and ask it to join. `peer_channel_create` makes a new channel issue (linked to a related issue if you like), so agent traffic stays out of real work items.
+- **Inboxes** are issues in the bus repository titled `[peer-bus] inbox: @<login>`, for direct messages to a person's sessions.
+- **Access** is repository access: you can join a channel if you can read and comment on its issue, and you can use inboxes if you can access the bus repository.
 
 ## Tools
 
@@ -15,8 +15,9 @@ See [DESIGN.md](DESIGN.md) for how it works.
 | `peer_configure(repo)` | Use `owner/repo` as the bus for every session for this user on this machine. Stops watching the repo so bus traffic doesn't flood your notifications. |
 | `peer_join(name, default?)` | Join as `<your login>/<name>`. With `default: true`, this session also receives messages addressed to you as a person. Rejoins automatically after restarts. |
 | `peer_leave()` | Leave the bus. |
-| `peer_channel_join(channel)` / `peer_channel_leave(channel)` | Join or leave a channel. Joining creates it if needed. |
-| `peer_list(channel?)` | This session's status, the bus's channels, and online sessions. |
+| `peer_channel_join(channel)` / `peer_channel_leave(channel)` | Join or leave a channel: an issue URL, `owner/repo#123`, `#123` (bus repo), or a name (an issue titled `[peer-bus] channel: <name>` in the bus repo, created if missing). |
+| `peer_channel_create(title, about?, repo?)` | Create a new channel issue (in the bus repo unless `repo` is given), link it to `about`, and join it. Returns the URL to share. |
+| `peer_list(channel?)` | This session's status, known channels, and online sessions. |
 | `peer_send(to, message, channel?, kind?)` | Send a message. See addressing below. |
 | `peer_trust(login, trusted?)` | Let another person's tasks reach this session's agent. Asks you for permission. |
 
@@ -46,7 +47,15 @@ Without a `channel`, a message goes to the recipient's inbox, so all recipients 
 
 ## Use
 
-> Join #release-testing. Then ask natefinch/windows-tester and natefinch/linux-tester to run the smoke tests on main and send me the results.
+> Create a peer-bus channel about https://github.com/acme/app/issues/123 for smoke testing.
+
+Then, in a session on each test machine:
+
+> Join the peer-bus channel https://github.com/natefinch/copilot-peer-bus/issues/42.
+
+And from the first session:
+
+> Ask everyone in the channel to run the smoke tests on main and send me the results.
 
 Incoming messages arrive as a prompt wrapped in `<peer_message where="..." from="..." ...>`, with a hint on how to reply.
 
@@ -56,6 +65,8 @@ Incoming messages arrive as a prompt wrapped in `<peer_message where="..." from=
 - Alive is internal and undocumented. If it stops working, sessions check for new messages every 10 seconds instead. Those checks use ETags, so unchanged issues don't count against your rate limit.
 - GitHub limits how fast comments can be created, so the bus suits chat-paced messages, not bursts.
 - Everyone with repository access can read every message, including direct messages.
+- Every channel message notifies people watching that issue's repository, unless they're muted (see the `notifications` scope above). Creating channel issues in the bus repository avoids this, since `peer_configure` stops you watching it.
+- Pull requests can't be channels; create a channel issue and link the pull request.
 
 ## Development
 

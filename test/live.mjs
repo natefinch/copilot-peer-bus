@@ -18,7 +18,7 @@ if (!repo) {
 }
 const home = mkdtempSync(path.join(os.tmpdir(), "peer-bus-live-"));
 const run = Date.now().toString(36);
-const channel = `live-test-${run}`;
+let channelRef = null;
 
 function waitFor(predicate, timeoutMs = 20_000) {
     return new Promise((resolve, reject) => {
@@ -68,23 +68,23 @@ try {
     console.log(`direct: send call ${sendMs}ms, delivered ${b.prompts[0].at - sentAt}ms after send started`);
     assert.match(b.prompts[0].prompt, /live direct message/);
 
-    await a.bus.joinChannel(channel);
-    await b.bus.joinChannel(channel);
+    const created = await a.bus.createChannel({ title: `peer-bus live test ${run}` });
+    channelRef = { repo: created.repo, number: created.number };
+    await b.bus.joinChannel(created.html_url);
     await waitFor(() => a.bus.alive.live && b.bus.alive.live);
     sentAt = Date.now();
-    await b.bus.send({ to: "*", channel, message: "live channel broadcast" });
+    await b.bus.send({ to: "*", channel: created.html_url, message: "live channel broadcast" });
     await waitFor(() => a.prompts.length === 1);
-    console.log(`channel: delivered ${a.prompts[0].at - sentAt}ms after send started`);
-    assert.match(a.prompts[0].prompt, /where="#live-test/);
+    console.log(`channel (joined by URL): delivered ${a.prompts[0].at - sentAt}ms after send started`);
+    assert.match(a.prompts[0].prompt, /peer-bus live test/);
 
-    const { sessions } = await a.bus.list({ channel });
+    const { sessions } = await a.bus.list({ channel: created.html_url });
     assert.deepEqual(sessions.map((s) => s.session).sort(), [a.name, b.name].sort());
     console.log("PASS");
 } finally {
-    const channelIssue = a.bus.dir?.channels.get(channel);
     await a.bus.leave().catch(() => {});
     await b.bus.leave().catch(() => {});
-    if (channelIssue) await a.github.closeIssue(channelIssue.number).catch(() => {});
+    if (channelRef) await a.github.closeIssue(channelRef).catch(() => {});
     a.bus.stop();
     b.bus.stop();
     rmSync(home, { recursive: true, force: true });

@@ -2,6 +2,8 @@
 
 import { execFile } from "node:child_process";
 
+import { issueKey } from "./protocol.mjs";
+
 export class GitHubError extends Error {
     constructor(message, status) {
         super(message);
@@ -106,9 +108,10 @@ export class GitHub {
         return items;
     }
 
-    async graphql(query, variables = {}) {
+    // With partial: true, returns whatever data GitHub resolved even if some fields errored.
+    async graphql(query, variables = {}, { partial = false } = {}) {
         const result = await this.request("POST", "/graphql", { query, variables });
-        if (result?.errors?.length) throw new GitHubError(`GitHub GraphQL failed: ${result.errors.map((e) => e.message).join("; ")}`, 200);
+        if (result?.errors?.length && !(partial && result.data)) throw new GitHubError(`GitHub GraphQL failed: ${result.errors.map((e) => e.message).join("; ")}`, 200);
         return result.data;
     }
 
@@ -150,29 +153,38 @@ export class GitHub {
         return issues;
     }
 
-    createIssue(title, body) {
-        return this.request("POST", this.repoPath("/issues"), { title, body });
+    // Issue operations take a ref: { repo: "owner/name", number }.
+    issuePath({ repo, number }, suffix = "") {
+        return `/repos/${repo}/issues/${number}${suffix}`;
     }
 
-    async closeIssue(number) {
-        await this.request("PATCH", this.repoPath(`/issues/${number}`), { state: "closed", state_reason: "not_planned" });
+    createIssue(title, body, repo = this.repo) {
+        return this.request("POST", `/repos/${repo}/issues`, { title, body });
     }
 
-    listComments(number, since) {
+    getIssue(ref) {
+        return this.request("GET", this.issuePath(ref));
+    }
+
+    async closeIssue(ref) {
+        await this.request("PATCH", this.issuePath(ref), { state: "closed", state_reason: "not_planned" });
+    }
+
+    listComments(ref, since) {
         const query = new URLSearchParams({ per_page: "100" });
         if (since) query.set("since", since);
-        return this.paginate(this.repoPath(`/issues/${number}/comments?${query}`), { conditional: true });
+        return this.paginate(this.issuePath(ref, `/comments?${query}`), { conditional: true });
     }
 
-    async latestComment(number) {
-        const issue = await this.request("GET", this.repoPath(`/issues/${number}`));
+    async latestComment(ref) {
+        const issue = await this.getIssue(ref);
         if (!issue.comments) return null;
-        const page = await this.request("GET", this.repoPath(`/issues/${number}/comments?per_page=1&page=${issue.comments}`));
+        const page = await this.request("GET", this.issuePath(ref, `/comments?per_page=1&page=${issue.comments}`));
         return page[0] ?? null;
     }
 
-    createComment(number, body) {
-        return this.request("POST", this.repoPath(`/issues/${number}/comments`), { body });
+    createComment(ref, body) {
+        return this.request("POST", this.issuePath(ref, "/comments"), { body });
     }
 
     updateComment(id, body) {
@@ -194,19 +206,30 @@ export class GitHub {
         return (await this.request("GET", "/alive_internal/websocket-url")).url;
     }
 
-    // Returns Map(issueNumber -> signed Alive channel) for the issues' UPDATED channel.
-    async issueUpdateChannels(numbers) {
+    // Returns Map(issueKey -> signed Alive channel) for the issues' UPDATED channel. Issues that can't be
+    // resolved (no access, deleted) are left out rather than failing the whole lookup.
+    async issueUpdateChannels(refs) {
         const result = new Map();
-        if (numbers.length === 0) return result;
-        const fields = numbers.map((n) => `i${n}: issue(number: ${Number(n)}) { updatesChannel(name: UPDATED) }`).join("\n");
-        const data = await this.graphql(`query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { ${fields} } }`, {
-            owner: this.owner,
-            name: this.name,
-        });
-        for (const n of numbers) {
-            const channel = data?.repository?.[`i${n}`]?.updatesChannel;
-            if (channel) result.set(Number(n), channel);
+        const byRepo = new Map();
+        for (const ref of refs) {
+            const repoKey = ref.repo.toLowerCase();
+            if (!byRepo.has(repoKey)) byRepo.set(repoKey, { repo: ref.repo, numbers: new Set() });
+            byRepo.get(repoKey).numbers.add(Number(ref.number));
         }
+        if (byRepo.size === 0) return result;
+        const groups = [...byRepo.values()];
+        const parts = groups.map(({ repo, numbers }, index) => {
+            const [owner, name] = repo.split("/");
+            const fields = [...numbers].map((n) => `i${n}: issue(number: ${n}) { updatesChannel(name: UPDATED) }`).join(" ");
+            return `r${index}: repository(owner: ${JSON.stringify(owner)}, name: ${JSON.stringify(name)}) { ${fields} }`;
+        });
+        const data = await this.graphql(`query { ${parts.join("\n")} }`, {}, { partial: true });
+        groups.forEach(({ repo, numbers }, index) => {
+            for (const n of numbers) {
+                const channel = data?.[`r${index}`]?.[`i${n}`]?.updatesChannel;
+                if (channel) result.set(issueKey({ repo, number: n }), channel);
+            }
+        });
         return result;
     }
 }

@@ -1,29 +1,46 @@
 // Peer-bus core: channels and inboxes are GitHub issues, messages are comments, Alive pushes changes.
+// A channel is any issue (identified by "owner/repo#123"); named channels are issues in the bus repo.
 
 import { AliveWatcher } from "./alive.mjs";
 import {
+    REPO,
     channelTitle,
+    describeChannel,
     encodeMessage,
     encodePresence,
     formatAddress,
     formatPrompt,
     inboxTitle,
     isAddressedTo,
+    issueKey,
     parseAddress,
+    parseChannel,
     parseComment,
     parseTitle,
     sameLogin,
     sameSession,
     senderAddress,
-    validateChannelName,
+    validateRepo,
     validateSessionName,
 } from "./protocol.mjs";
 
 const MAX_CATCH_UP = 20;
-const CHANNEL_BODY = "Peer-bus channel. Copilot sessions post messages here as comments. Humans can comment too.";
+const NAMED_CHANNEL_BODY = "Peer-bus channel. Copilot sessions post messages here as comments. Humans can comment too.";
 const INBOX_BODY = "Peer-bus inbox. Direct messages to this person's Copilot sessions are posted here as comments.";
+const ABOUT = /^(https:\/\/github\.com\/\S+|[A-Za-z0-9-]+\/[A-Za-z0-9._-]+#\d+|#\d+)$/;
 
 const truncate = (text, max) => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
+const repoFromUrl = (url) => /^https:\/\/[^/]+\/([^/]+\/[^/]+)\/issues\/\d+/.exec(url ?? "")?.[1];
+const isChannelEntry = (c) => c && typeof c === "object" && REPO.test(c.repo ?? "") && Number.isInteger(c.number) && c.number > 0;
+
+function channelBody(about) {
+    const lines = [
+        "**Peer-bus channel.** Copilot sessions coordinate here by posting comments; people can comment too.",
+        "To add a session, give it this issue's URL and ask it to join the channel (`peer_channel_join`).",
+    ];
+    if (about) lines.push("", `Related: ${about}`);
+    return lines.join("\n");
+}
 
 export class PeerBus {
     constructor({
@@ -65,7 +82,8 @@ export class PeerBus {
     async start() {
         const saved = this.store.load();
         if (!saved?.name || saved.repo !== this.github.repo) return false;
-        this.state = { channels: [], trusted: [], cursors: {}, presenceCommentId: null, isDefault: false, ...saved };
+        this.state = { trusted: [], cursors: {}, presenceCommentId: null, isDefault: false, ...saved };
+        this.state.channels = Array.isArray(saved.channels) ? saved.channels.filter(isChannelEntry) : [];
         await this.connectWithRetry();
         return true;
     }
@@ -100,8 +118,7 @@ export class PeerBus {
         validateSessionName(name);
         const login = await this.github.login();
         const inbox = await this.ensureInbox(login);
-        const comments = await this.github.listComments(inbox.number);
-        for (const comment of comments) {
+        for (const comment of await this.github.listComments(inbox)) {
             const presence = parseComment(comment, []);
             if (presence.type !== "presence" || !sameLogin(presence.author, login)) continue;
             const fresh = this.isFresh(presence);
@@ -140,35 +157,60 @@ export class PeerBus {
         return name;
     }
 
+    // channel: issue URL, "owner/repo#123", "#123" (bus repo), or a name (bus repo; created if missing).
     async joinChannel(channel) {
         this.requireJoined();
-        validateChannelName(channel);
-        if (this.state.channels.includes(channel)) return { url: this.sourceForChannel(channel)?.url, created: false, already: true };
-        const dir = await this.directory(true);
-        let issue = dir.channels.get(channel);
-        const created = !issue;
-        issue ??= await this.createIssue(channelTitle(channel), CHANNEL_BODY, (d) => d.channels.get(channel));
-        this.state.channels.push(channel);
-        await this.addSource(issue, channel);
+        const issue = await this.resolveChannel(channel, { create: true });
+        const key = issueKey(issue);
+        const existing = this.state.channels.find((c) => issueKey(c) === key);
+        if (existing) return { ...issue, label: describeChannel(existing), already: true };
+        const entry = { repo: issue.repo, number: issue.number, title: issue.title, ...(issue.name ? { name: issue.name } : {}) };
+        await this.addSource(issue, entry);
+        this.state.channels.push(entry);
         this.save();
-        this.alive?.setIssues([...this.sources.keys()]);
+        this.alive?.setIssues(this.sourceRefs());
         await this.upsertPresence();
-        return { url: issue.html_url, created, already: false };
+        return { ...issue, label: describeChannel(entry), already: false };
+    }
+
+    // Creates a new issue to serve as a channel (in the bus repo unless `repo` is given) and joins it.
+    async createChannel({ title, repo, about }) {
+        this.requireJoined();
+        const target = repo ? validateRepo(repo) : this.github.repo;
+        const text = String(title ?? "").trim();
+        if (!text) throw new Error("A channel needs a title.");
+        if (parseTitle(text)) throw new Error("That title is reserved for the bus's own inboxes and named channels.");
+        const related = about ? String(about).trim() : "";
+        if (related && !ABOUT.test(related)) throw new Error(`"${about}" isn't an issue or pull request reference. Use a github.com URL or owner/repo#123.`);
+        let created;
+        try {
+            created = await this.github.createIssue(text, channelBody(related), target);
+        } catch (error) {
+            if ([403, 404, 410].includes(error.status)) {
+                throw new Error(`Can't create an issue in ${target}: you need access to it and issues must be enabled. (${error.message})`);
+            }
+            throw error;
+        }
+        await this.mute(created.node_id);
+        const joined = await this.joinChannel(`${repoFromUrl(created.html_url) ?? target}#${created.number}`);
+        return { ...joined, inBusRepo: target.toLowerCase() === this.github.repo.toLowerCase() };
     }
 
     async leaveChannel(channel) {
         this.requireJoined();
-        if (!this.state.channels.includes(channel)) return false;
-        this.state.channels = this.state.channels.filter((c) => c !== channel);
-        const source = this.sourceForChannel(channel);
-        if (source) {
-            this.sources.delete(source.number);
-            delete this.state.cursors[source.number];
-        }
+        const parsed = parseChannel(channel, this.github.repo);
+        const entry = this.state.channels.find((c) =>
+            parsed.kind === "name" ? c.name === parsed.name : issueKey(c) === issueKey(parsed)
+        );
+        if (!entry) return null;
+        const key = issueKey(entry);
+        this.state.channels = this.state.channels.filter((c) => issueKey(c) !== key);
+        this.sources.delete(key);
+        delete this.state.cursors[key];
         this.save();
-        this.alive?.setIssues([...this.sources.keys()]);
+        this.alive?.setIssues(this.sourceRefs());
         await this.upsertPresence();
-        return true;
+        return describeChannel(entry);
     }
 
     async send({ to, message, channel, kind = "task" }) {
@@ -184,41 +226,58 @@ export class PeerBus {
             }
         }
 
-        let issue;
+        let target;
         if (channel) {
-            validateChannelName(channel);
-            issue = (await this.directory()).channels.get(channel) ?? (await this.directory(true)).channels.get(channel);
-            if (!issue) throw new Error(`Channel #${channel} doesn't exist. Create it with peer_channel_join.`);
+            target = await this.resolveChannel(channel, { create: false });
         } else {
             if (addresses.some((a) => a.kind === "all")) throw new Error('"*" needs a channel.');
             const logins = new Set(addresses.map((a) => a.login.toLowerCase()));
             if (logins.size > 1) throw new Error("A direct message goes to one person's inbox. Send separate messages, or use a channel.");
-            issue = await this.inboxFor(addresses[0].login);
-            if (!issue) throw new Error(`${addresses[0].login} hasn't joined the peer bus yet (no inbox in ${this.github.repo}).`);
+            target = await this.inboxFor(addresses[0].login);
+            if (!target) throw new Error(`${addresses[0].login} hasn't joined the peer bus yet (no inbox in ${this.github.repo}).`);
         }
 
         const comment = await this.github.createComment(
-            issue.number,
+            target,
             encodeMessage({ login: this.me.login, from: this.me.session, to: addresses, kind, body })
         );
-        await this.mute(issue.node_id);
+        await this.mute(target.node_id);
         const notes = await this.recipientNotes(addresses).catch(() => []);
         return { url: comment.html_url, notes };
     }
 
     async list({ channel } = {}) {
-        if (channel) validateChannelName(channel);
+        let filterKey = null;
+        if (channel) {
+            const parsed = parseChannel(channel, this.github.repo);
+            if (parsed.kind === "name") {
+                const named = (await this.directory(true)).channels.get(parsed.name);
+                if (!named) throw new Error(`Channel "${parsed.name}" doesn't exist in ${this.github.repo}.`);
+                filterKey = issueKey(named);
+            } else {
+                filterKey = issueKey(parsed);
+            }
+        }
         const dir = await this.directory(true);
+        const channels = new Map();
+        for (const named of dir.channels.values()) {
+            channels.set(issueKey(named), { id: issueKey(named), label: describeChannel(named), online: 0 });
+        }
         const sessions = [];
         for (const inbox of dir.inboxes.values()) {
             for (const presence of await this.presences(inbox)) {
                 if (!presence.fresh) continue;
-                if (channel && !presence.channels.includes(channel)) continue;
+                for (const c of presence.channels) {
+                    const known = channels.get(c.id) ?? { id: c.id, label: c.title ? `${c.id} "${truncate(c.title, 80)}"` : c.id, online: 0 };
+                    known.online++;
+                    channels.set(c.id, known);
+                }
+                if (filterKey && !presence.channels.some((c) => c.id === filterKey)) continue;
                 sessions.push({ ...presence, login: inbox.login });
             }
         }
         sessions.sort((a, b) => `${a.login}/${a.session}`.localeCompare(`${b.login}/${b.session}`));
-        return { channels: [...dir.channels.keys()].sort(), sessions };
+        return { channels: [...channels.values()].sort((a, b) => a.id.localeCompare(b.id)), sessions };
     }
 
     trust(login, trusted) {
@@ -236,10 +295,55 @@ export class PeerBus {
         return {
             address: `${this.me.login}/${this.me.session}`,
             isDefault: this.me.isDefault,
-            channels: [...this.state.channels],
+            channels: this.state.channels.map(describeChannel),
             trusted: [...this.state.trusted],
             push: this.alive?.live ? "live" : "polling",
             inboxUrl: this.inbox?.html_url,
+        };
+    }
+
+    // --- channels ---------------------------------------------------------------------------
+
+    // Returns { repo, number, title, html_url, node_id, name?, created }.
+    async resolveChannel(channel, { create }) {
+        const parsed = parseChannel(channel, this.github.repo);
+        if (parsed.kind === "name") {
+            let named = (await this.directory()).channels.get(parsed.name) ?? (await this.directory(true)).channels.get(parsed.name);
+            let created = false;
+            if (!named) {
+                if (!create) throw new Error(`Channel "${parsed.name}" doesn't exist in ${this.github.repo}. Join it with peer_channel_join to create it.`);
+                named = await this.createBusIssue(channelTitle(parsed.name), NAMED_CHANNEL_BODY, (d) => d.channels.get(parsed.name));
+                created = true;
+            }
+            return { ...named, title: channelTitle(parsed.name), name: parsed.name, created };
+        }
+        const joined = this.sources.get(issueKey(parsed));
+        if (joined?.channel) return { ...joined.issue, created: false };
+        let issue;
+        try {
+            issue = await this.github.getIssue(parsed);
+        } catch (error) {
+            if ([401, 403, 404, 410].includes(error.status)) {
+                throw new Error(`Can't access ${parsed.repo}#${parsed.number}. Check the link, and that you have access to ${parsed.repo}.`);
+            }
+            throw error;
+        }
+        if (issue.pull_request) {
+            throw new Error(`${parsed.repo}#${parsed.number} is a pull request. Create an issue for the channel with peer_channel_create and link the pull request.`);
+        }
+        const title = parseTitle(issue.title);
+        if (title?.type === "inbox") throw new Error("That's a personal inbox, not a channel. Message its owner with peer_send and no channel.");
+        const repo = repoFromUrl(issue.html_url) ?? parsed.repo;
+        const isBus = repo.toLowerCase() === this.github.repo.toLowerCase();
+        return {
+            repo,
+            number: issue.number,
+            title: issue.title,
+            html_url: issue.html_url,
+            node_id: issue.node_id,
+            state: issue.state,
+            ...(title?.type === "channel" && isBus ? { name: title.name } : {}),
+            created: false,
         };
     }
 
@@ -253,10 +357,14 @@ export class PeerBus {
         this.inbox = await this.ensureInbox(login);
         this.sources.clear();
         await this.addSource(this.inbox, null);
-        const dir = await this.directory(true);
-        for (const channel of this.state.channels) {
-            const issue = dir.channels.get(channel) ?? (await this.createIssue(channelTitle(channel), CHANNEL_BODY, (d) => d.channels.get(channel)));
-            await this.addSource(issue, channel);
+        for (const entry of this.state.channels) {
+            try {
+                const issue = await this.resolveChannel(issueKey(entry), { create: false });
+                entry.title = issue.title;
+                await this.addSource(issue, entry);
+            } catch (error) {
+                this.log(`skipping channel ${describeChannel(entry)}: ${error.message}`, "warning");
+            }
         }
         this.save();
         await this.upsertPresence();
@@ -264,12 +372,12 @@ export class PeerBus {
         if (!this.alive) {
             this.alive = this.createAlive({
                 github: this.github,
-                onSignal: (number) => this.fetchSource(number),
+                onSignal: (key) => this.fetchSource(key),
                 onLiveChange: (live) => this.onAliveLiveChange(live),
                 log: (text) => this.log(text),
             });
         }
-        this.alive.setIssues([...this.sources.keys()]);
+        this.alive.setIssues(this.sourceRefs());
         this.alive.start();
         this.addTimer(setInterval(() => this.upsertPresence().catch((e) => this.log(`presence update failed: ${e.message}`)), this.presenceMs));
         this.schedulePoll();
@@ -312,7 +420,7 @@ export class PeerBus {
         return this.now() - Date.parse(presence.updatedAt) < this.staleMs;
     }
 
-    // --- directory -------------------------------------------------------------------------
+    // --- bus repo directory ----------------------------------------------------------------
 
     async directory(force = false) {
         if (!force && this.dir && this.now() - this.dir.at < this.directoryTtlMs) return this.dir;
@@ -321,9 +429,9 @@ export class PeerBus {
         const issues = (await this.github.listOpenIssues()).sort((a, b) => a.number - b.number);
         for (const issue of issues) {
             const parsed = parseTitle(issue.title);
-            const entry = { number: issue.number, node_id: issue.node_id, html_url: issue.html_url };
+            const entry = { repo: this.github.repo, number: issue.number, node_id: issue.node_id, html_url: issue.html_url };
             if (parsed?.type === "channel" && !channels.has(parsed.name)) {
-                channels.set(parsed.name, { ...entry, channel: parsed.name });
+                channels.set(parsed.name, { ...entry, name: parsed.name });
             } else if (parsed?.type === "inbox" && sameLogin(issue.user?.login, parsed.login)) {
                 const key = parsed.login.toLowerCase();
                 if (!inboxes.has(key)) inboxes.set(key, { ...entry, login: issue.user.login });
@@ -339,25 +447,25 @@ export class PeerBus {
     }
 
     async ensureInbox(login) {
-        return (await this.inboxFor(login)) ?? this.createIssue(inboxTitle(login), INBOX_BODY, (d) => d.inboxes.get(login.toLowerCase()));
+        return (await this.inboxFor(login)) ?? this.createBusIssue(inboxTitle(login), INBOX_BODY, (d) => d.inboxes.get(login.toLowerCase()));
     }
 
-    // Creates an issue, then returns the directory's winner in case another session raced us.
-    async createIssue(title, body, pick) {
+    // Creates a bus-repo issue, then returns the directory's winner in case another session raced us.
+    async createBusIssue(title, body, pick) {
         const created = await this.github.createIssue(title, body);
         await this.mute(created.node_id);
         const winner = pick(await this.directory(true));
         if (winner && winner.number !== created.number) {
-            await this.github.closeIssue(created.number).catch(() => {});
+            await this.github.closeIssue({ repo: this.github.repo, number: created.number }).catch(() => {});
             return winner;
         }
-        return winner ?? { number: created.number, node_id: created.node_id, html_url: created.html_url };
+        return winner ?? { repo: this.github.repo, number: created.number, node_id: created.node_id, html_url: created.html_url };
     }
 
     async presences(inbox) {
         const since = new Date(this.now() - this.staleMs - 60_000).toISOString();
         const result = [];
-        for (const comment of await this.github.listComments(inbox.number, since)) {
+        for (const comment of await this.github.listComments(inbox, since)) {
             const presence = parseComment(comment, []);
             if (presence.type === "presence" && sameLogin(presence.author, inbox.login)) {
                 result.push({ ...presence, fresh: this.isFresh(presence) });
@@ -374,7 +482,7 @@ export class PeerBus {
             sid: this.sid,
             host: this.host,
             platform: this.platform,
-            channels: this.state.channels,
+            channels: this.state.channels.map((c) => ({ id: issueKey(c), title: c.name ? `#${c.name}` : truncate(c.title ?? "", 200) })),
             isDefault: this.state.isDefault,
         });
         if (this.state.presenceCommentId) {
@@ -385,7 +493,7 @@ export class PeerBus {
                 if (error.status !== 404) throw error;
             }
         }
-        const comment = await this.github.createComment(this.inbox.number, body);
+        const comment = await this.github.createComment(this.inbox, body);
         this.state.presenceCommentId = comment.id;
         this.save();
         await this.mute(this.inbox.node_id);
@@ -393,7 +501,7 @@ export class PeerBus {
 
     // Unsubscribes this user from an issue thread so bus traffic doesn't flood their notifications.
     async mute(nodeId) {
-        if (this.muteUnavailable) return;
+        if (this.muteUnavailable || !nodeId) return;
         if (this.github.scopes && !this.github.scopes.has("notifications")) {
             this.muteUnavailable = true;
             return;
@@ -431,49 +539,52 @@ export class PeerBus {
 
     // --- receiving -------------------------------------------------------------------------
 
-    sourceForChannel(channel) {
-        return [...this.sources.values()].find((s) => s.channel === channel);
+    sourceRefs() {
+        return [...this.sources.values()].map((source) => source.ref);
     }
 
+    // issue: { repo, number, html_url, node_id, ... }; channel: the joined channel entry, or null for the inbox.
     async addSource(issue, channel) {
-        this.sources.set(issue.number, { number: issue.number, channel, url: issue.html_url, node_id: issue.node_id });
-        if (!this.state.cursors[issue.number]) {
-            const latest = await this.github.latestComment(issue.number);
-            this.state.cursors[issue.number] = latest ? { id: latest.id, createdAt: latest.created_at } : { id: 0, createdAt: null };
+        const ref = { repo: issue.repo, number: issue.number };
+        const key = issueKey(ref);
+        this.sources.set(key, { key, ref, channel, issue, url: issue.html_url, node_id: issue.node_id });
+        if (!this.state.cursors[key]) {
+            const latest = await this.github.latestComment(ref);
+            this.state.cursors[key] = latest ? { id: latest.id, createdAt: latest.created_at } : { id: 0, createdAt: null };
         }
     }
 
     fetchAll() {
-        return Promise.all([...this.sources.keys()].map((number) => this.fetchSource(number)));
+        return Promise.all([...this.sources.keys()].map((key) => this.fetchSource(key)));
     }
 
     // Serializes fetches per issue and coalesces signals that arrive while one is queued.
-    fetchSource(number) {
-        const entry = this.fetchers.get(number) ?? { chain: Promise.resolve(), queued: null };
-        this.fetchers.set(number, entry);
+    fetchSource(key) {
+        const entry = this.fetchers.get(key) ?? { chain: Promise.resolve(), queued: null };
+        this.fetchers.set(key, entry);
         if (entry.queued) return entry.queued;
         const run = entry.chain.then(() => {
             entry.queued = null;
-            return this.fetchSourceNow(number);
+            return this.fetchSourceNow(key);
         });
-        entry.queued = run.catch((error) => this.log(`fetching #${number} failed: ${error.message}`, "warning"));
+        entry.queued = run.catch((error) => this.log(`fetching ${key} failed: ${error.message}`, "warning"));
         entry.chain = entry.queued;
         return entry.queued;
     }
 
-    async fetchSourceNow(number) {
-        const source = this.sources.get(number);
+    async fetchSourceNow(key) {
+        const source = this.sources.get(key);
         if (!source || !this.me) return;
-        const cursor = this.state.cursors[number] ?? { id: 0, createdAt: null };
-        const comments = await this.github.listComments(number, cursor.createdAt);
+        const cursor = this.state.cursors[key] ?? { id: 0, createdAt: null };
+        const comments = await this.github.listComments(source.ref, cursor.createdAt);
         const fresh = comments.filter((c) => c.id > cursor.id).sort((a, b) => a.id - b.id);
-        if (fresh.length === 0 || !this.sources.has(number)) return;
+        if (fresh.length === 0 || !this.sources.has(key)) return;
         const last = fresh.at(-1);
-        this.state.cursors[number] = { id: last.id, createdAt: last.created_at };
+        this.state.cursors[key] = { id: last.id, createdAt: last.created_at };
         this.save();
 
         const defaultTo = source.channel ? [{ kind: "all" }] : [{ kind: "person", login: this.me.login }];
-        const where = source.channel ? `#${source.channel}` : "direct";
+        const where = source.channel ? describeChannel(source.channel) : "direct";
         const incoming = [];
         for (const comment of fresh) {
             const message = parseComment(comment, defaultTo);

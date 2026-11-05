@@ -7,7 +7,7 @@ polling.
 
 ## Goals
 
-- Group conversations in named channels, one per project or effort.
+- Group conversations in channels, each backed by an issue and shared by its URL.
 - Direct messages to a specific person or to one of their sessions.
 - Access control, identity, and history provided by GitHub rather than bespoke infrastructure.
 - Messages arrive as prompts only when the recipient trusts the sender.
@@ -17,12 +17,20 @@ polling.
 | Concept | GitHub object |
 | --- | --- |
 | Bus | A private repository. Repo access is bus membership. |
-| Channel | Open issue titled `[peer-bus] channel: <name>` (lowercase name). |
+| Channel | Any issue, identified as `owner/repo#number`. Named channels are open bus-repo issues titled `[peer-bus] channel: <name>`. |
 | Inbox | Open issue titled `[peer-bus] inbox: @<login>`, **authored by that login**. |
 | Message | Issue comment with a readable header and a hidden metadata marker. |
 | Presence | One comment per joined session in its owner's inbox, refreshed periodically. |
 
-Issues are discovered by title through GraphQL. The REST issue list lags several seconds behind
+Sessions join channels by issue: a URL, `owner/repo#123`, `#123` (bus repo), or a name. Access to a
+channel is access to its repository, so different projects can have different members. The
+recommended way to start one is `peer_channel_create`, which opens a new issue (in the bus repo by
+default) whose body links the related work issue or pull request, keeping agent traffic out of
+the work item itself. Pull requests and inbox issues can't be channels. Joined channels are
+stored per session as `{ repo, number, title, name? }` and re-resolved on reconnect; channels the
+session can no longer access are skipped with a warning.
+
+Named channels and inboxes are discovered by title through GraphQL. The REST issue list lags several seconds behind
 issue creation, which let sessions joining back to back create duplicate inboxes and channels;
 GraphQL reflects a new issue immediately. When titles still collide (a true simultaneous create),
 the lowest issue number wins and the creator of the loser closes it. An inbox is
@@ -56,7 +64,7 @@ signal (with the new comment's ID, but not its content) when an issue changes. M
 sent by creating comments through the REST API.
 
 1. Resolves the signed Alive `UPDATED` channel for its inbox and joined channel issues via
-   GraphQL `updatesChannel`, then subscribes over the Alive WebSocket
+   GraphQL `updatesChannel` (one query, aliased per repository; inaccessible issues are skipped), then subscribes over the Alive WebSocket
    (`/alive_internal/websocket-url`). Ordinary `gh` OAuth tokens can do both.
 2. On a push for an issue, fetches comments newer than its cursor (`since=<cursor time>`,
    filtered to IDs above the cursor ID) and advances the cursor.
@@ -94,7 +102,8 @@ a notification. Incoming text is wrapped in `<peer_message>` with closing tags n
 ## Presence
 
 Joining posts a presence comment in the owner's inbox containing the session name, a hash of
-the Copilot session ID, host, platform, joined channels, and the default flag. It is edited every
+the Copilot session ID, host, platform, joined channels (issue key and title), and the default
+flag. `peer_list` derives the set of active channels from these, plus the bus repo's named channels. It is edited every
 5 minutes (edits don't notify) and deleted by `peer_leave`. Sessions whose comment hasn't been
 updated for 15 minutes are offline. A session name already held by a fresh presence from a
 different Copilot session is rejected; a stale one is taken over.

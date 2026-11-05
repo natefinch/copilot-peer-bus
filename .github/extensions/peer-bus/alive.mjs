@@ -1,5 +1,7 @@
-// Watches GitHub issues for changes over GitHub Alive and reports which issue changed.
+// Watches GitHub issues for changes over GitHub Alive and reports which issue changed (by issue key).
 // Alive only signals "something changed"; callers fetch the actual comments.
+
+import { issueKey } from "./protocol.mjs";
 
 const SUBSCRIBE_BATCH = 25;
 
@@ -30,9 +32,11 @@ export class AliveWatcher {
         return typeof this.WebSocketImpl === "function";
     }
 
-    setIssues(numbers) {
-        const next = [...new Set(numbers.map(Number))].sort((a, b) => a - b);
-        if (next.join() === this.issues.join()) return;
+    // refs: [{ repo, number }]
+    setIssues(refs) {
+        const byKey = new Map(refs.map((ref) => [issueKey(ref), { repo: ref.repo, number: Number(ref.number) }]));
+        const next = [...byKey.entries()].sort(([a], [b]) => a.localeCompare(b));
+        if (next.map(([key]) => key).join() === this.issues.map(([key]) => key).join()) return;
         this.issues = next;
         if (!this.stopped) this.reconnect(0);
     }
@@ -95,11 +99,11 @@ export class AliveWatcher {
 
     async connect() {
         const generation = ++this.generation;
-        const signedByIssue = await this.github.issueUpdateChannels(this.issues);
+        const signedByIssue = await this.github.issueUpdateChannels(this.issues.map(([, ref]) => ref));
         if (signedByIssue.size === 0) throw new Error("no Alive channels resolved (token may lack Alive access)");
         const issueByName = new Map();
-        for (const [number, signed] of signedByIssue) {
-            for (const name of channelNamesFromSigned(signed)) issueByName.set(name, number);
+        for (const [key, signed] of signedByIssue) {
+            for (const name of channelNamesFromSigned(signed)) issueByName.set(name, key);
         }
         const url = await this.github.aliveSocketUrl();
         if (generation !== this.generation || this.stopped) return;
@@ -127,8 +131,8 @@ export class AliveWatcher {
                 this.backoffMs = 1000;
                 this.setLive(true);
             } else if (frame.e === "msg") {
-                const number = issueByName.get(frame.ch);
-                if (number !== undefined) this.onSignal(number);
+                const key = issueByName.get(frame.ch);
+                if (key !== undefined) this.onSignal(key);
             }
         };
         socket.onclose = (event) => {
