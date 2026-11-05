@@ -119,12 +119,12 @@ const tools = [
     {
         name: "peer_channel_join",
         description:
-            "Join a peer-bus channel. A channel is a GitHub issue: pass its URL (e.g. https://github.com/acme/app/issues/123), " +
-            "owner/repo#123, #123 for an issue in the bus repo, or a channel name in the bus repo (created if missing). " +
+            "Join a peer-bus channel. A channel is a GitHub issue: pass its URL (e.g. https://github.com/acme/app/issues/123) " +
+            "or owner/repo#123. " +
             "Channel messages addressed to this session or to * arrive here.",
         parameters: {
             type: "object",
-            properties: { channel: { type: "string", description: "Issue URL, owner/repo#123, #123, or channel name." } },
+            properties: { channel: { type: "string", description: "Channel issue URL or owner/repo#123." } },
             required: ["channel"],
         },
         skipPermission: true,
@@ -132,7 +132,7 @@ const tools = [
             const result = await requireBus().joinChannel(channel);
             if (result.already) return `Already in ${result.label}.`;
             const closed = result.state === "closed" ? " Note: the issue is closed." : "";
-            return `${result.created ? "Created and joined" : "Joined"} ${result.label}: ${result.html_url}.${closed} Use channel="${issueKey(result)}" with peer_send.`;
+            return `Joined ${result.label}.${closed} Use channel="${issueKey(result)}" with peer_send.`;
         },
     },
     {
@@ -161,7 +161,7 @@ const tools = [
     },
     {
         name: "peer_channel_leave",
-        description: "Leave a peer-bus channel (issue URL, owner/repo#123, #123, or channel name).",
+        description: "Leave a peer-bus channel (issue URL or owner/repo#123).",
         parameters: { type: "object", properties: { channel: { type: "string" } }, required: ["channel"] },
         skipPermission: true,
         handler: async ({ channel }) => {
@@ -172,11 +172,11 @@ const tools = [
     {
         name: "peer_list",
         description:
-            "Show this session's peer-bus status, known channels (named channels in the bus repo and channels online sessions are in), " +
+            "Show this session's peer-bus status, the channels online sessions are in, " +
             "and online sessions, optionally only those in one channel.",
         parameters: {
             type: "object",
-            properties: { channel: { type: "string", description: "Only show sessions in this channel (issue URL, owner/repo#123, #123, or name)." } },
+            properties: { channel: { type: "string", description: "Only show sessions in this channel (issue URL or owner/repo#123)." } },
         },
         skipPermission: true,
         defer: "never",
@@ -212,7 +212,7 @@ const tools = [
             properties: {
                 to: { type: "string", description: "Recipient address; separate multiple addresses with commas." },
                 message: { type: "string", description: "Self-contained message text." },
-                channel: { type: "string", description: "Channel to post in (issue URL, owner/repo#123, #123, or name). Omit for a direct message." },
+                channel: { type: "string", description: "Channel to post in (issue URL or owner/repo#123). Omit for a direct message." },
                 kind: { type: "string", enum: ["task", "notify"], description: "Default task." },
             },
             required: ["to", "message"],

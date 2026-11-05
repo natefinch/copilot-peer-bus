@@ -100,18 +100,18 @@ test("extension: configure, join, message across sessions, and rejoin after rest
 
     assert.match(await mac.call("peer_join", { name: "mac", default: true }), /Joined the peer bus as natefinch\/mac \(default session\)/);
     await win.call("peer_join", { name: "win" });
-    assert.match(await win.call("peer_channel_join", { channel: "release" }), /Created and joined #release \(acme\/bus#\d+\)/);
+    await assert.rejects(win.call("peer_channel_join", { channel: "release" }), /Invalid channel/);
     const created = await mac.call("peer_channel_create", { title: "Windows smoke tests", about: "acme/bus#1" });
     const url = /Share this URL so other sessions can join: (\S+)\.$/.exec(created)[1];
-    assert.match(await win.call("peer_channel_join", { channel: url }), /Joined acme\/bus#\d+ "Windows smoke tests".*Use channel="acme\/bus#\d+" with peer_send/);
+    assert.match(await win.call("peer_channel_join", { channel: url }), /Joined "Windows smoke tests" \(https:\/\/github\.com\/acme\/bus\/issues\/\d+\)\..*Use channel="acme\/bus#\d+" with peer_send/);
     await mac.call("peer_send", { to: "*", channel: url, message: "smoke tests please" });
     await waitFor(() => win.prompts().length === 1);
     assert.match(win.prompts()[0], /smoke tests please/);
 
     const list = await mac.call("peer_list");
     assert.match(list, /This session: natefinch\/mac \(default\) · push polling/);
-    assert.match(list, /- natefinch\/win: .*· acme\/bus#\d+, acme\/bus#\d+/);
-    assert.match(list, /- #release \(acme\/bus#\d+\): 1 online/);
+    assert.match(list, /- natefinch\/win: .*· acme\/bus#\d+/);
+    assert.match(list, /- "Windows smoke tests" \(https:\/\/github\.com\/acme\/bus\/issues\/\d+\): 2 online/);
 
     assert.match(
         await mac.call("peer_send", { to: "natefinch/win", message: "please run the test suite" }),

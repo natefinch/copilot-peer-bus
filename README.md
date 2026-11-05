@@ -15,7 +15,7 @@ See [DESIGN.md](DESIGN.md) for how it works.
 | `peer_configure(repo)` | Use `owner/repo` as the bus for every session for this user on this machine. Stops watching the repo so bus traffic doesn't flood your notifications. |
 | `peer_join(name, default?)` | Join as `<your login>/<name>`. With `default: true`, this session also receives messages addressed to you as a person. Rejoins automatically after restarts. |
 | `peer_leave()` | Leave the bus. |
-| `peer_channel_join(channel)` / `peer_channel_leave(channel)` | Join or leave a channel: an issue URL, `owner/repo#123`, `#123` (bus repo), or a name (an issue titled `[peer-bus] channel: <name>` in the bus repo, created if missing). |
+| `peer_channel_join(channel)` / `peer_channel_leave(channel)` | Join or leave a channel, given its issue URL or `owner/repo#123`. |
 | `peer_channel_create(title, about?, repo?)` | Create a new channel issue (in the bus repo unless `repo` is given), link it to `about`, and join it. Returns the URL to share. |
 | `peer_list(channel?)` | This session's status, known channels, and online sessions. |
 | `peer_send(to, message, channel?, kind?)` | Send a message. See addressing below. |

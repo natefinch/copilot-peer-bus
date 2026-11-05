@@ -1,9 +1,7 @@
 // Wire format for peer-bus issues and comments. Pure functions; no I/O.
 
 export const SESSION_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
-export const CHANNEL_NAME = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const LOGIN = "[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})";
-const CHANNEL_TITLE = /^\[peer-bus\] channel: ([a-z0-9][a-z0-9._-]{0,63})$/;
 const INBOX_TITLE = new RegExp(`^\\[peer-bus\\] inbox: @(${LOGIN})$`);
 const ADDRESS = new RegExp(`^@?(${LOGIN})(?:/([A-Za-z0-9][A-Za-z0-9._-]{0,63}))?$`);
 const MARKER = /<!--\s*peer-bus:v1\s+(\{[\s\S]*?\})\s*-->/g;
@@ -23,40 +21,34 @@ export function validateRepo(repo) {
     return repo;
 }
 
-// Parses a channel reference: an issue URL, "owner/repo#123", "#123" (in the bus repo), or a channel name (in the bus repo).
-export function parseChannel(text, busRepo) {
+export const issueUrl = ({ repo, number }) => `https://github.com/${repo}/issues/${number}`;
+
+// Parses a channel reference: a github.com issue URL or "owner/repo#123".
+export function parseChannel(text) {
     const trimmed = String(text ?? "").trim();
-    let match = ISSUE_URL.exec(trimmed);
-    if (match) {
-        if (match[2].toLowerCase() === "pull") {
-            throw new Error("Pull requests can't be channels. Create an issue for the channel with peer_channel_create and link the pull request.");
-        }
-        return { kind: "issue", repo: match[1], number: Number(match[3]) };
+    const key = ISSUE_KEY.exec(trimmed);
+    if (key) return { repo: key[1], number: Number(key[2]) };
+    const match = ISSUE_URL.exec(trimmed);
+    if (!match) {
+        throw new Error(`Invalid channel "${text}". Use the channel issue's URL (https://github.com/owner/repo/issues/123) or owner/repo#123.`);
     }
-    if ((match = ISSUE_KEY.exec(trimmed))) return { kind: "issue", repo: match[1], number: Number(match[2]) };
-    if ((match = /^#(\d+)$/.exec(trimmed))) return { kind: "issue", repo: busRepo, number: Number(match[1]) };
-    if (CHANNEL_NAME.test(trimmed)) return { kind: "name", name: trimmed };
-    throw new Error(
-        `Invalid channel "${text}". Use an issue URL (https://github.com/owner/repo/issues/123), owner/repo#123, #123 in the bus repo, or a lowercase channel name.`
-    );
+    if (match[2].toLowerCase() === "pull") {
+        throw new Error("Pull requests can't be channels. Create an issue for the channel with peer_channel_create and link the pull request.");
+    }
+    return { repo: match[1], number: Number(match[3]) };
 }
 
 const shorten = (text, max) => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
 
-// Human-readable channel label, e.g. '#release (acme/bus#4)' or 'acme/app#12 "Windows smoke tests"'.
+// Human-readable channel label, e.g. '"Windows smoke tests" (https://github.com/acme/app/issues/12)'.
 export function describeChannel(channel) {
-    const key = issueKey(channel);
-    if (channel.name) return `#${channel.name} (${key})`;
-    return channel.title ? `${key} "${shorten(channel.title, 80)}"` : key;
+    return channel.title ? `"${shorten(channel.title, 80)}" (${issueUrl(channel)})` : issueUrl(channel);
 }
 
-export const channelTitle = (name) => `[peer-bus] channel: ${name}`;
 export const inboxTitle = (login) => `[peer-bus] inbox: @${login}`;
 
 export function parseTitle(title) {
-    let match = CHANNEL_TITLE.exec(title ?? "");
-    if (match) return { type: "channel", name: match[1] };
-    match = INBOX_TITLE.exec(title ?? "");
+    const match = INBOX_TITLE.exec(title ?? "");
     if (match) return { type: "inbox", login: match[1] };
     return null;
 }
@@ -64,13 +56,6 @@ export function parseTitle(title) {
 export function validateSessionName(name) {
     if (typeof name !== "string" || !SESSION_NAME.test(name)) {
         throw new Error(`Invalid session name "${name}". Use letters, digits, '.', '_' or '-' (max 64).`);
-    }
-    return name;
-}
-
-export function validateChannelName(name) {
-    if (typeof name !== "string" || !CHANNEL_NAME.test(name)) {
-        throw new Error(`Invalid channel name "${name}". Use lowercase letters, digits, '.', '_' or '-' (max 64).`);
     }
     return name;
 }
@@ -191,7 +176,7 @@ export function formatPrompt(messages, me, { omitted = 0 } = {}) {
     );
     const first = messages[0];
     const replyHint = first.channel
-        ? `peer_send with channel="${issueKey(first.channel)}" and to="${senderAddress(first)}"`
+        ? `peer_send with channel="${issueUrl(first.channel)}" and to="${senderAddress(first)}"`
         : `peer_send with to="${senderAddress(first)}"`;
     return [
         ...(omitted > 0 ? [`(${omitted} older peer message(s) were skipped during catch-up; see the issue for history.)`] : []),

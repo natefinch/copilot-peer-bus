@@ -3,7 +3,6 @@ import { describe, test } from "node:test";
 
 import { channelNamesFromSigned } from "../.github/extensions/peer-bus/alive.mjs";
 import {
-    channelTitle,
     describeChannel,
     encodeMessage,
     encodePresence,
@@ -29,9 +28,8 @@ const comment = (author, body, id = 1) => ({
 
 describe("titles", () => {
     test("round-trip and reject lookalikes", () => {
-        assert.deepEqual(parseTitle(channelTitle("release")), { type: "channel", name: "release" });
         assert.deepEqual(parseTitle(inboxTitle("Alice-1")), { type: "inbox", login: "Alice-1" });
-        assert.equal(parseTitle("[peer-bus] channel: Release"), null);
+        assert.equal(parseTitle("[peer-bus] channel: release"), null);
         assert.equal(parseTitle("[peer-bus] inbox: alice"), null);
         assert.equal(parseTitle("something else"), null);
     });
@@ -112,26 +110,25 @@ describe("comments", () => {
         );
         assert.match(prompt, /^\(2 older peer message/);
         assert.equal((prompt.match(/<\/peer_message>/g) ?? []).length, 1);
-        assert.match(prompt, /peer_send with channel="acme\/app#7" and to="alice\/build"/);
+        assert.match(prompt, /peer_send with channel="https:\/\/github\.com\/Acme\/App\/issues\/7" and to="alice\/build"/);
         assert.match(prompt, /where="Acme\/App#7 &quot;UI&quot;"/);
     });
 });
 
 describe("channels", () => {
-    test("parseChannel accepts issue URLs, refs, bus numbers, and names", () => {
-        assert.deepEqual(parseChannel("https://github.com/Acme/App/issues/12#issuecomment-5", "o/bus"), { kind: "issue", repo: "Acme/App", number: 12 });
-        assert.deepEqual(parseChannel(" acme/app#3 ", "o/bus"), { kind: "issue", repo: "acme/app", number: 3 });
-        assert.deepEqual(parseChannel("#9", "o/bus"), { kind: "issue", repo: "o/bus", number: 9 });
-        assert.deepEqual(parseChannel("release", "o/bus"), { kind: "name", name: "release" });
-        assert.throws(() => parseChannel("https://github.com/acme/app/pull/4", "o/bus"), /Pull requests can't be channels/);
-        assert.throws(() => parseChannel("https://example.com/acme/app/issues/4", "o/bus"), /Invalid channel/);
-        assert.throws(() => parseChannel("Release", "o/bus"), /Invalid channel/);
+    test("parseChannel accepts issue URLs and owner/repo#123 only", () => {
+        assert.deepEqual(parseChannel("https://github.com/Acme/App/issues/12#issuecomment-5"), { repo: "Acme/App", number: 12 });
+        assert.deepEqual(parseChannel(" acme/app#3 "), { repo: "acme/app", number: 3 });
+        assert.throws(() => parseChannel("https://github.com/acme/app/pull/4"), /Pull requests can't be channels/);
+        for (const bad of ["#9", "9", "release", "https://example.com/acme/app/issues/4", ""]) {
+            assert.throws(() => parseChannel(bad), /Invalid channel/, bad);
+        }
     });
 
     test("issueKey and describeChannel", () => {
         assert.equal(issueKey({ repo: "Acme/App", number: 12 }), "acme/app#12");
-        assert.equal(describeChannel({ repo: "o/bus", number: 4, name: "release" }), "#release (o/bus#4)");
-        assert.equal(describeChannel({ repo: "Acme/App", number: 12, title: "Smoke tests" }), 'acme/app#12 "Smoke tests"');
+        assert.equal(describeChannel({ repo: "Acme/App", number: 12, title: "Smoke tests" }), '"Smoke tests" (https://github.com/Acme/App/issues/12)');
+        assert.equal(describeChannel({ repo: "o/bus", number: 4 }), "https://github.com/o/bus/issues/4");
     });
 });
 

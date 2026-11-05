@@ -1,10 +1,9 @@
 // Peer-bus core: channels and inboxes are GitHub issues, messages are comments, Alive pushes changes.
-// A channel is any issue (identified by "owner/repo#123"); named channels are issues in the bus repo.
+// A channel is any issue, referenced by its URL and identified internally by "owner/repo#123".
 
 import { AliveWatcher } from "./alive.mjs";
 import {
     REPO,
-    channelTitle,
     describeChannel,
     encodeMessage,
     encodePresence,
@@ -13,6 +12,7 @@ import {
     inboxTitle,
     isAddressedTo,
     issueKey,
+    issueUrl,
     parseAddress,
     parseChannel,
     parseComment,
@@ -25,9 +25,8 @@ import {
 } from "./protocol.mjs";
 
 const MAX_CATCH_UP = 20;
-const NAMED_CHANNEL_BODY = "Peer-bus channel. Copilot sessions post messages here as comments. Humans can comment too.";
 const INBOX_BODY = "Peer-bus inbox. Direct messages to this person's Copilot sessions are posted here as comments.";
-const ABOUT = /^(https:\/\/github\.com\/\S+|[A-Za-z0-9-]+\/[A-Za-z0-9._-]+#\d+|#\d+)$/;
+const ABOUT = /^(https:\/\/github\.com\/\S+|[A-Za-z0-9-]+\/[A-Za-z0-9._-]+#\d+)$/;
 
 const truncate = (text, max) => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
 const repoFromUrl = (url) => /^https:\/\/[^/]+\/([^/]+\/[^/]+)\/issues\/\d+/.exec(url ?? "")?.[1];
@@ -157,14 +156,14 @@ export class PeerBus {
         return name;
     }
 
-    // channel: issue URL, "owner/repo#123", "#123" (bus repo), or a name (bus repo; created if missing).
+    // channel: the channel issue's URL.
     async joinChannel(channel) {
         this.requireJoined();
-        const issue = await this.resolveChannel(channel, { create: true });
+        const issue = await this.resolveChannel(channel);
         const key = issueKey(issue);
         const existing = this.state.channels.find((c) => issueKey(c) === key);
         if (existing) return { ...issue, label: describeChannel(existing), already: true };
-        const entry = { repo: issue.repo, number: issue.number, title: issue.title, ...(issue.name ? { name: issue.name } : {}) };
+        const entry = { repo: issue.repo, number: issue.number, title: issue.title };
         await this.addSource(issue, entry);
         this.state.channels.push(entry);
         this.save();
@@ -179,7 +178,7 @@ export class PeerBus {
         const target = repo ? validateRepo(repo) : this.github.repo;
         const text = String(title ?? "").trim();
         if (!text) throw new Error("A channel needs a title.");
-        if (parseTitle(text)) throw new Error("That title is reserved for the bus's own inboxes and named channels.");
+        if (parseTitle(text)) throw new Error("That title is reserved for the bus's inboxes.");
         const related = about ? String(about).trim() : "";
         if (related && !ABOUT.test(related)) throw new Error(`"${about}" isn't an issue or pull request reference. Use a github.com URL or owner/repo#123.`);
         let created;
@@ -192,16 +191,14 @@ export class PeerBus {
             throw error;
         }
         await this.mute(created.node_id);
-        const joined = await this.joinChannel(`${repoFromUrl(created.html_url) ?? target}#${created.number}`);
+        const joined = await this.joinChannel(created.html_url);
         return { ...joined, inBusRepo: target.toLowerCase() === this.github.repo.toLowerCase() };
     }
 
     async leaveChannel(channel) {
         this.requireJoined();
-        const parsed = parseChannel(channel, this.github.repo);
-        const entry = this.state.channels.find((c) =>
-            parsed.kind === "name" ? c.name === parsed.name : issueKey(c) === issueKey(parsed)
-        );
+        const parsedKey = issueKey(parseChannel(channel));
+        const entry = this.state.channels.find((c) => issueKey(c) === parsedKey);
         if (!entry) return null;
         const key = issueKey(entry);
         this.state.channels = this.state.channels.filter((c) => issueKey(c) !== key);
@@ -228,7 +225,7 @@ export class PeerBus {
 
         let target;
         if (channel) {
-            target = await this.resolveChannel(channel, { create: false });
+            target = await this.resolveChannel(channel);
         } else {
             if (addresses.some((a) => a.kind === "all")) throw new Error('"*" needs a channel.');
             const logins = new Set(addresses.map((a) => a.login.toLowerCase()));
@@ -247,28 +244,16 @@ export class PeerBus {
     }
 
     async list({ channel } = {}) {
-        let filterKey = null;
-        if (channel) {
-            const parsed = parseChannel(channel, this.github.repo);
-            if (parsed.kind === "name") {
-                const named = (await this.directory(true)).channels.get(parsed.name);
-                if (!named) throw new Error(`Channel "${parsed.name}" doesn't exist in ${this.github.repo}.`);
-                filterKey = issueKey(named);
-            } else {
-                filterKey = issueKey(parsed);
-            }
-        }
+        const filterKey = channel ? issueKey(parseChannel(channel)) : null;
         const dir = await this.directory(true);
         const channels = new Map();
-        for (const named of dir.channels.values()) {
-            channels.set(issueKey(named), { id: issueKey(named), label: describeChannel(named), online: 0 });
-        }
         const sessions = [];
         for (const inbox of dir.inboxes.values()) {
             for (const presence of await this.presences(inbox)) {
                 if (!presence.fresh) continue;
                 for (const c of presence.channels) {
-                    const known = channels.get(c.id) ?? { id: c.id, label: c.title ? `${c.id} "${truncate(c.title, 80)}"` : c.id, online: 0 };
+                    const [repo, number] = c.id.split("#");
+                    const known = channels.get(c.id) ?? { id: c.id, label: describeChannel({ repo, number, title: c.title }), online: 0 };
                     known.online++;
                     channels.set(c.id, known);
                 }
@@ -304,21 +289,11 @@ export class PeerBus {
 
     // --- channels ---------------------------------------------------------------------------
 
-    // Returns { repo, number, title, html_url, node_id, name?, created }.
-    async resolveChannel(channel, { create }) {
-        const parsed = parseChannel(channel, this.github.repo);
-        if (parsed.kind === "name") {
-            let named = (await this.directory()).channels.get(parsed.name) ?? (await this.directory(true)).channels.get(parsed.name);
-            let created = false;
-            if (!named) {
-                if (!create) throw new Error(`Channel "${parsed.name}" doesn't exist in ${this.github.repo}. Join it with peer_channel_join to create it.`);
-                named = await this.createBusIssue(channelTitle(parsed.name), NAMED_CHANNEL_BODY, (d) => d.channels.get(parsed.name));
-                created = true;
-            }
-            return { ...named, title: channelTitle(parsed.name), name: parsed.name, created };
-        }
+    // Returns { repo, number, title, html_url, node_id, state }.
+    async resolveChannel(channel) {
+        const parsed = parseChannel(channel);
         const joined = this.sources.get(issueKey(parsed));
-        if (joined?.channel) return { ...joined.issue, created: false };
+        if (joined?.channel) return joined.issue;
         let issue;
         try {
             issue = await this.github.getIssue(parsed);
@@ -331,19 +306,14 @@ export class PeerBus {
         if (issue.pull_request) {
             throw new Error(`${parsed.repo}#${parsed.number} is a pull request. Create an issue for the channel with peer_channel_create and link the pull request.`);
         }
-        const title = parseTitle(issue.title);
-        if (title?.type === "inbox") throw new Error("That's a personal inbox, not a channel. Message its owner with peer_send and no channel.");
-        const repo = repoFromUrl(issue.html_url) ?? parsed.repo;
-        const isBus = repo.toLowerCase() === this.github.repo.toLowerCase();
+        if (parseTitle(issue.title)?.type === "inbox") throw new Error("That's a personal inbox, not a channel. Message its owner with peer_send and no channel.");
         return {
-            repo,
+            repo: repoFromUrl(issue.html_url) ?? parsed.repo,
             number: issue.number,
             title: issue.title,
             html_url: issue.html_url,
             node_id: issue.node_id,
             state: issue.state,
-            ...(title?.type === "channel" && isBus ? { name: title.name } : {}),
-            created: false,
         };
     }
 
@@ -359,7 +329,7 @@ export class PeerBus {
         await this.addSource(this.inbox, null);
         for (const entry of this.state.channels) {
             try {
-                const issue = await this.resolveChannel(issueKey(entry), { create: false });
+                const issue = await this.resolveChannel(issueUrl(entry));
                 entry.title = issue.title;
                 await this.addSource(issue, entry);
             } catch (error) {
@@ -420,24 +390,21 @@ export class PeerBus {
         return this.now() - Date.parse(presence.updatedAt) < this.staleMs;
     }
 
-    // --- bus repo directory ----------------------------------------------------------------
+    // --- bus repo inboxes -------------------------------------------------------------------
 
     async directory(force = false) {
         if (!force && this.dir && this.now() - this.dir.at < this.directoryTtlMs) return this.dir;
-        const channels = new Map();
         const inboxes = new Map();
         const issues = (await this.github.listOpenIssues()).sort((a, b) => a.number - b.number);
         for (const issue of issues) {
             const parsed = parseTitle(issue.title);
-            const entry = { repo: this.github.repo, number: issue.number, node_id: issue.node_id, html_url: issue.html_url };
-            if (parsed?.type === "channel" && !channels.has(parsed.name)) {
-                channels.set(parsed.name, { ...entry, name: parsed.name });
-            } else if (parsed?.type === "inbox" && sameLogin(issue.user?.login, parsed.login)) {
-                const key = parsed.login.toLowerCase();
-                if (!inboxes.has(key)) inboxes.set(key, { ...entry, login: issue.user.login });
+            if (parsed?.type !== "inbox" || !sameLogin(issue.user?.login, parsed.login)) continue;
+            const key = parsed.login.toLowerCase();
+            if (!inboxes.has(key)) {
+                inboxes.set(key, { repo: this.github.repo, number: issue.number, node_id: issue.node_id, html_url: issue.html_url, login: issue.user.login });
             }
         }
-        this.dir = { at: this.now(), channels, inboxes };
+        this.dir = { at: this.now(), inboxes };
         return this.dir;
     }
 
@@ -482,7 +449,7 @@ export class PeerBus {
             sid: this.sid,
             host: this.host,
             platform: this.platform,
-            channels: this.state.channels.map((c) => ({ id: issueKey(c), title: c.name ? `#${c.name}` : truncate(c.title ?? "", 200) })),
+            channels: this.state.channels.map((c) => ({ id: issueKey(c), title: truncate(c.title ?? "", 200) })),
             isDefault: this.state.isDefault,
         });
         if (this.state.presenceCommentId) {
