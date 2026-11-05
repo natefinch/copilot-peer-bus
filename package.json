@@ -1,0 +1,12 @@
+{
+  "name": "copilot-peer-bus",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Lets GitHub Copilot sessions on different machines message each other through a small relay.",
+  "type": "module",
+  "engines": { "node": ">=18.17" },
+  "scripts": {
+    "start": "node relay/server.mjs",
+    "test": "node --test test/*.test.mjs"
+  }
+}
