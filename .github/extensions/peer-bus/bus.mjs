@@ -4,10 +4,14 @@
 import { AliveWatcher } from "./alive.mjs";
 import {
     COMMENT_URL,
+    MAX_COMMENT_LENGTH,
     MESSAGE_ID,
+    acknowledgers,
     describeChannel,
     encodeMessage,
+    encodeExit,
     encodeHeartbeat,
+    formatHistory,
     formatPrompt,
     isAddressedTo,
     issueKey,
@@ -27,6 +31,8 @@ import {
 const STATE_VERSION = 2;
 const MAX_CATCH_UP = 20;
 const MAX_INDEXED_MESSAGES = 1000;
+const MAX_PENDING_RECEIPTS = 50;
+const RECEIPT_TTL_MS = 24 * 60 * 60_000;
 const ABOUT = /^(https:\/\/github\.com\/\S+|[A-Za-z0-9-]+\/[A-Za-z0-9._-]+#\d+)$/;
 export const MUTE_HELP =
     "The peer bus mutes each channel issue so bus messages don't send GitHub notifications, which needs the GitHub CLI's " +
@@ -67,6 +73,7 @@ export class PeerBus {
         this.sources = new Map();
         this.fetchers = new Map();
         this.messageIndex = new Map();
+        this.receipts = new Map();
         this.alive = null;
         this.timers = [];
         this.retryMs = 30_000;
@@ -138,9 +145,10 @@ export class PeerBus {
     async leave() {
         if (!this.state) return null;
         const name = this.address ?? this.state.name;
-        this.me = null;
         this.clearTimers();
         this.alive?.stop();
+        if (this.me) for (const entry of this.state.channels) await this.postExit(entry);
+        this.me = null;
         for (const entry of this.state.channels) await this.deleteStatus(entry);
         this.store.clear();
         this.state = null;
@@ -154,6 +162,7 @@ export class PeerBus {
         const key = issueKey(issue);
         const existing = this.state.channels.find((c) => issueKey(c) === key);
         if (existing) return { ...issue, label: describeChannel(existing), already: true };
+        if (issue.state === "closed") throw new Error(`${describeChannel(issue)} is closed. Reopen the issue to use it as a channel.`);
         await this.mute(issue.node_id, { required: true });
         await this.checkNameFree(issue, this.me.login, this.me.session);
         const entry = { repo: issue.repo, number: issue.number, title: issue.title, nodeId: issue.node_id, statusCommentId: null, heartReactionId: null };
@@ -192,14 +201,53 @@ export class PeerBus {
         const key = issueKey(parseChannel(channel));
         const entry = this.state.channels.find((c) => issueKey(c) === key);
         if (!entry) return null;
+        await this.dropChannel(entry, { announce: true });
+        return describeChannel(entry);
+    }
+
+    // Stops listening in a channel: optionally posts an exit_channel message, then deletes the heartbeat comment.
+    async dropChannel(entry, { announce }) {
+        const key = issueKey(entry);
+        if (announce) await this.postExit(entry);
         await this.deleteStatus(entry);
         this.state.channels = this.state.channels.filter((c) => issueKey(c) !== key);
         this.sources.delete(key);
         this.messageIndex.delete(key);
+        this.receipts.delete(key);
         delete this.state.cursors[key];
         this.save();
         this.alive?.setIssues(this.sourceRefs());
-        return describeChannel(entry);
+    }
+
+    async postExit(entry) {
+        if (this.github.scopes && !this.github.scopes.has("notifications")) {
+            this.log(`not posting an exit message in ${describeChannel(entry)}: it can't be muted without the notifications scope`, "warning");
+            return;
+        }
+        try {
+            await this.github.createComment(entry, encodeExit({ from: this.address }));
+            await this.mute(entry.nodeId);
+        } catch (error) {
+            this.log(`could not post an exit message in ${describeChannel(entry)}: ${error.message}`, "warning");
+        }
+    }
+
+    // The last `limit` messages in a channel (joined or not), for catching up on context.
+    async history({ channel, limit = 20 }) {
+        this.requireJoined();
+        const count = Math.min(Math.max(Math.trunc(Number(limit)) || 20, 1), 100);
+        const issue = await this.resolveChannel(channel);
+        const key = issueKey(issue);
+        const entries = [];
+        const comments = (await this.github.listComments({ repo: issue.repo, number: issue.number })).sort((a, b) => a.id - b.id);
+        for (const comment of comments) {
+            const parsed = parseComment(comment);
+            if (parsed.type === "heartbeat") continue;
+            if (parsed.type === "message") this.rememberMessage(key, parsed.messageId, parsed.url);
+            if (parsed.type !== "exit" && !parsed.body) continue;
+            entries.push(parsed);
+        }
+        return formatHistory(entries.slice(-count), { channel: issue, total: entries.length, isTrusted: (m) => this.isTrusted(m.author) });
     }
 
     // replyTo: a message ID (m-…) or a comment permalink.
@@ -221,8 +269,16 @@ export class PeerBus {
         this.requireMuteScope();
         const re = replyTo ? await this.resolveReply(source, replyTo) : null;
         const id = newMessageId();
-        const comment = await this.github.createComment(source.ref, encodeMessage({ id, from: this.address, to: addresses, re, kind, body }));
+        const text = encodeMessage({ id, from: this.address, to: addresses, re, kind, body });
+        if (text.length > MAX_COMMENT_LENGTH) {
+            throw new Error(
+                `The message is too long: ${text.length.toLocaleString("en-US")} characters with headers, and GitHub comments are limited to ` +
+                    `${MAX_COMMENT_LENGTH.toLocaleString("en-US")}. Shorten it, or put long content such as logs in a gist and link to it.`
+            );
+        }
+        const comment = await this.github.createComment(source.ref, text);
         this.rememberMessage(source.key, id, comment.html_url);
+        this.trackReceipt(source.key, { commentId: comment.id, messageId: id, repo: source.ref.repo, waiting: acknowledgers(addresses) });
         await this.mute(source.issue.node_id);
         const notes = await this.recipientNotes(source, addresses).catch(() => []);
         return { id, url: comment.html_url, notes };
@@ -429,7 +485,7 @@ export class PeerBus {
                 throw new Error(`Can't find the comment ${text} to reply to.`);
             }
             const parsed = parseComment(comment);
-            if (parsed.type === "heartbeat") throw new Error("That's a heartbeat comment, not a message.");
+            if (parsed.type === "heartbeat" || parsed.type === "exit") throw new Error("That's not a message comment.");
             return { id: parsed.messageId, url: comment.html_url };
         }
         if (MESSAGE_ID.test(text)) {
@@ -453,7 +509,7 @@ export class PeerBus {
         if (known && COMMENT_URL.exec(known)?.[3] === String(re.commentId)) return;
         try {
             const target = parseComment(await this.github.getComment(re.repo, re.commentId));
-            if (target.type !== "heartbeat" && target.messageId === re.id) return;
+            if ((target.type === "message" || target.type === "human") && target.messageId === re.id) return;
             message.reNote = "its re header doesn't match the linked comment, so it was ignored";
         } catch {
             message.reNote = "its re header couldn't be checked, so it was ignored";
@@ -470,10 +526,15 @@ export class PeerBus {
         this.me = { login, session: this.state.name };
         if (this.github.scopes && !this.github.scopes.has("notifications")) this.log(MUTE_HELP, "warning");
         this.sources.clear();
-        for (const entry of this.state.channels) {
+        for (const entry of [...this.state.channels]) {
             try {
                 const issue = await this.resolveChannel(issueUrl(entry));
                 Object.assign(entry, { title: issue.title, nodeId: issue.node_id });
+                if (issue.state === "closed") {
+                    await this.dropChannel(entry, { announce: false });
+                    this.notify(`📪 ${describeChannel(entry)} was closed, so this session left it.`);
+                    continue;
+                }
                 await this.addSource(issue, entry);
                 await this.ensureStatus(entry);
             } catch (error) {
@@ -566,6 +627,21 @@ export class PeerBus {
     async fetchSourceNow(key) {
         const source = this.sources.get(key);
         if (!source || !this.me) return;
+        if (await this.leaveIfClosed(source)) return;
+        await this.fetchNewComments(source);
+        await this.checkReceipts(source);
+    }
+
+    async leaveIfClosed(source) {
+        const issue = await this.github.getIssue(source.ref, { conditional: true });
+        if (issue.state !== "closed" || !this.sources.has(source.key)) return false;
+        await this.dropChannel(source.channel, { announce: false });
+        this.notify(`📪 ${describeChannel(source.channel)} was closed, so this session left it.`);
+        return true;
+    }
+
+    async fetchNewComments(source) {
+        const { key } = source;
         const cursor = this.state.cursors[key] ?? { id: 0, createdAt: null };
         const comments = await this.github.listComments(source.ref, cursor.createdAt);
         const fresh = comments.filter((c) => c.id > cursor.id).sort((a, b) => a.id - b.id);
@@ -578,6 +654,11 @@ export class PeerBus {
         for (const comment of fresh) {
             const message = parseComment(comment);
             if (message.type === "heartbeat") continue;
+            if (message.type === "exit") {
+                const self = sameLogin(message.author, this.me.login) && sameSession(message.session, this.me.session);
+                if (!self) this.notify(`👋 ${message.author}/${message.session} left ${describeChannel(source.channel)}.`);
+                continue;
+            }
             this.rememberMessage(key, message.messageId, message.url);
             if (!message.body || !isAddressedTo(message, this.me)) continue;
             incoming.push({ ...message, channel: source.channel });
@@ -592,12 +673,51 @@ export class PeerBus {
         }
     }
 
+    // Remembers a sent message whose recipients will mark it read with 👀, so the sender can be told.
+    trackReceipt(key, receipt) {
+        if (receipt.waiting.size === 0) return;
+        const pending = this.receipts.get(key) ?? new Map();
+        pending.set(receipt.commentId, { ...receipt, sentAt: this.now() });
+        if (pending.size > MAX_PENDING_RECEIPTS) pending.delete(pending.keys().next().value);
+        this.receipts.set(key, pending);
+    }
+
+    async checkReceipts(source) {
+        const pending = this.receipts.get(source.key);
+        if (!pending) return;
+        for (const [commentId, receipt] of pending) {
+            if (this.now() - receipt.sentAt > RECEIPT_TTL_MS) {
+                pending.delete(commentId);
+                continue;
+            }
+            let reactions;
+            try {
+                reactions = await this.github.listReactions(receipt.repo, commentId, "eyes");
+            } catch (error) {
+                if (error.status === 404) pending.delete(commentId);
+                continue;
+            }
+            for (const reaction of reactions) {
+                const login = reaction.user?.login?.toLowerCase();
+                const address = login && receipt.waiting.get(login);
+                if (!address) continue;
+                receipt.waiting.delete(login);
+                this.notify(`👀 ${address} read ${receipt.messageId} in ${describeChannel(source.channel)}.`);
+            }
+            if (receipt.waiting.size === 0) pending.delete(commentId);
+        }
+    }
+
+    isTrusted(login) {
+        return sameLogin(login, this.me.login) || this.state.trusted.some((l) => sameLogin(l, login));
+    }
+
     // Delivers trusted tasks to the agent and everything else to the human. Returns the messages shown.
     dispatch(incoming) {
         const tasks = [];
         const notes = [];
         for (const message of incoming) {
-            const trusted = sameLogin(message.author, this.me.login) || this.state.trusted.some((l) => sameLogin(l, message.author));
+            const trusted = this.isTrusted(message.author);
             if (message.kind === "task" && trusted) tasks.push(message);
             else notes.push({ message, untrustedTask: message.kind === "task" });
         }

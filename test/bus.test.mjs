@@ -5,7 +5,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, test } from "node:test";
 
 import { MUTE_HELP, PeerBus } from "../.github/extensions/peer-bus/bus.mjs";
-import { GitHub } from "../.github/extensions/peer-bus/github.mjs";
+import { GitHub, rateLimitDelay } from "../.github/extensions/peer-bus/github.mjs";
 import { parseComment } from "../.github/extensions/peer-bus/protocol.mjs";
 import { SessionStore } from "../.github/extensions/peer-bus/state.mjs";
 import { FakeAlive, createFakeGitHub } from "./fixtures/fake-github.mjs";
@@ -333,4 +333,139 @@ test("GitHub client paginates and reuses ETags", async () => {
     const before = fake.stats.notModified;
     assert.equal((await github.listComments(ref)).length, 150);
     assert.equal(fake.stats.notModified - before, 2, "both pages returned 304");
+});
+
+describe("leaving and closed channels", () => {
+    test("leaving posts exit_channel; others see a note, not a prompt", async () => {
+        const mac = await inChannel("natefinch", "mac");
+        const win = await inChannel("natefinch", "win");
+        const other = fake.addIssue("natefinch", "Other");
+        await win.bus.joinChannel(other.html_url);
+
+        await win.bus.leaveChannel(channel.html_url);
+        const exit = fake.comments.find((c) => c.body === "**from:** natefinch/win\n**kind:** exit_channel");
+        assert.ok(exit, "exit message posted");
+        assert.equal(exit.issue, channel.number);
+        await waitFor(() => mac.notes.some((n) => n === `👋 natefinch/win left "Release testing" (${channel.html_url}).`));
+        assert.equal(mac.prompts.length, 0);
+        assert.equal(statusComments().length, 2, "win's heartbeat in the first channel is gone");
+
+        await win.bus.leave();
+        assert.equal(fake.comments.filter((c) => c.body.endsWith("**kind:** exit_channel")).length, 2);
+        assert.equal(statusComments().length, 1);
+        await settle();
+        assert.equal(win.notes.filter((n) => n.startsWith("👋")).length, 0, "no note for your own exit");
+    });
+
+    test("a closed channel is left automatically, and closed issues can't be joined", async () => {
+        const mac = await inChannel("natefinch", "mac");
+        fake.closeIssue(channel.number);
+        await waitFor(() => mac.notes.some((n) => n.startsWith("📪") && n.includes("was closed")));
+        assert.deepEqual(mac.bus.status().channels, []);
+        assert.equal(statusComments().length, 0);
+        assert.equal(fake.comments.filter((c) => c.body.includes("exit_channel")).length, 0);
+        await assert.rejects(mac.bus.joinChannel(channel.html_url), /is closed/);
+    });
+
+    test("a restarted session drops channels closed while it was away", async () => {
+        await inChannel("natefinch", "win", { sessionId: "win-session" }).then((s) => s.bus.stop());
+        fake.closeIssue(channel.number);
+        const restarted = makeSession("natefinch", "win-session");
+        await restarted.bus.start();
+        assert.deepEqual(restarted.bus.status().channels, []);
+        assert.ok(restarted.notes.some((n) => n.includes("was closed")));
+    });
+});
+
+describe("history, receipts, and limits", () => {
+    test("peer_history returns recent messages, oldest first, marking untrusted senders", async () => {
+        const mac = await inChannel("natefinch", "mac");
+        const bob = await inChannel("bob", "helper");
+        await mac.bus.send({ channel: channel.html_url, to: "*", message: "first", kind: "notify" });
+        await bob.bus.send({ channel: channel.html_url, to: "natefinch/mac", message: "from bob" });
+        fake.addComment("natefinch", channel.number, "x".repeat(5000), "acme/channels");
+        await bob.bus.leaveChannel(channel.html_url);
+
+        const all = await mac.bus.history({ channel: channel.html_url });
+        assert.match(all, /^"Release testing" \(.+\): all 4 messages, oldest first\./);
+        assert.doesNotMatch(all, /heartbeat/);
+        assert.match(all, /from="natefinch\/mac" to="\*" kind="notify" at="[^"]+" trusted="true">\nfirst/);
+        assert.match(all, /from="bob\/helper" to="natefinch\/mac" kind="task" at="[^"]+" trusted="false">\nfrom bob/);
+        assert.match(all, /x{4000}… \(truncated; see the comment\)/);
+        assert.match(all, /\(bob\/helper left the channel at /);
+
+        const last = await mac.bus.history({ channel: channel.html_url, limit: 1 });
+        assert.match(last, /the last 1 of 4 messages/);
+        assert.doesNotMatch(last, />\nfirst\n|from bob/);
+        assert.match(last, /\(bob\/helper left the channel at /);
+    });
+
+    test("senders are told when a single addressed session reads their message", async () => {
+        const mac = await inChannel("natefinch", "mac");
+        await inChannel("natefinch", "win");
+        const alice = await inChannel("alice", "build");
+        alice.bus.trust("natefinch", true);
+
+        const sent = await mac.bus.send({ channel: channel.html_url, to: "natefinch/win, alice/build", message: "both of you" });
+        await waitFor(() => mac.notes.filter((n) => n.startsWith("👀")).length === 2);
+        assert.deepEqual(mac.notes.filter((n) => n.startsWith("👀")).sort(), [
+            `👀 alice/build read ${sent.id} in "Release testing" (${channel.html_url}).`,
+            `👀 natefinch/win read ${sent.id} in "Release testing" (${channel.html_url}).`,
+        ]);
+
+        await mac.bus.send({ channel: channel.html_url, to: "*", message: "everyone" });
+        await settle();
+        assert.equal(mac.bus.receipts.get(`acme/channels#${channel.number}`)?.size ?? 0, 0, "broadcasts aren't tracked");
+    });
+
+    test("messages over GitHub's comment limit are rejected", async () => {
+        const mac = await inChannel("natefinch", "mac");
+        const before = fake.comments.length;
+        await assert.rejects(
+            mac.bus.send({ channel: channel.html_url, to: "*", message: "y".repeat(65_500) }),
+            /too long: 65,5\d\d characters with headers.*limited to 65,536.*gist/
+        );
+        assert.equal(fake.comments.length, before);
+    });
+});
+
+describe("rate limits", () => {
+    const headers = (h) => new Headers(h);
+
+    test("rateLimitDelay follows GitHub's guidance", () => {
+        assert.equal(rateLimitDelay(403, headers({ "retry-after": "30" }), "", 0), 30_000);
+        assert.equal(rateLimitDelay(403, headers({ "x-ratelimit-remaining": "0", "x-ratelimit-reset": "1010" }), "", 0, 1_000_000), 11_000);
+        assert.equal(rateLimitDelay(403, headers({}), "You have exceeded a secondary rate limit", 0), 60_000);
+        assert.equal(rateLimitDelay(403, headers({}), "You have exceeded a secondary rate limit", 1), 120_000);
+        assert.equal(rateLimitDelay(429, headers({}), "", 0), 60_000);
+        assert.equal(rateLimitDelay(403, headers({}), "Resource not accessible by integration", 0), null);
+        assert.equal(rateLimitDelay(404, headers({ "retry-after": "5" }), "", 0), null);
+    });
+
+    function client(options = {}) {
+        const sleeps = [];
+        const github = new GitHub({ tokenProvider: async () => "tok-natefinch", apiUrl: fake.url, sleep: async (ms) => sleeps.push(ms), ...options });
+        return { github, sleeps };
+    }
+
+    test("rate-limited requests are retried after the indicated wait", async () => {
+        const { github, sleeps } = client();
+        fake.failNext(1, { status: 403, message: "You have exceeded a secondary rate limit", headers: { "Retry-After": "7" }, method: "POST" });
+        fake.failNext(1, { status: 403, message: "You have exceeded a secondary rate limit", method: "POST" });
+        const comment = await github.createComment({ repo: "acme/channels", number: channel.number }, "hello");
+        assert.equal(comment.body, "hello");
+        assert.deepEqual(sleeps, [7000, 120_000]);
+        assert.equal(fake.comments.length, 1);
+    });
+
+    test("gives up with a clear error when the wait would be too long, and never retries other 403s", async () => {
+        const { github, sleeps } = client();
+        fake.failNext(1, { status: 403, message: "API rate limit exceeded", headers: { "x-ratelimit-remaining": "0", "x-ratelimit-reset": String(Math.floor(Date.now() / 1000) + 3600) } });
+        await assert.rejects(github.getIssue({ repo: "acme/channels", number: channel.number }), /API rate limit exceeded GitHub rate limit: try again after/);
+        assert.deepEqual(sleeps, []);
+
+        fake.failNext(1, { status: 403, message: "Resource not accessible by integration" });
+        await assert.rejects(github.getIssue({ repo: "acme/channels", number: channel.number }), (e) => e.status === 403 && !/try again/.test(e.message));
+        assert.deepEqual(sleeps, []);
+    });
 });

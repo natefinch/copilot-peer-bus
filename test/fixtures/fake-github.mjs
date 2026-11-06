@@ -14,6 +14,7 @@ export function createFakeGitHub({ repos = { "acme/channels": {} }, users = ["na
     const comments = [];
     const reactions = [];
     const mutes = [];
+    const failures = [];
     const listeners = new Set();
     const stats = { requests: 0, notModified: 0 };
     let nextComment = 1000;
@@ -152,6 +153,11 @@ export function createFakeGitHub({ repos = { "acme/channels": {} }, users = ["na
     const server = http.createServer(async (req, res) => {
         stats.requests++;
         const url = new URL(req.url, baseUrl);
+        const failure = failures.find((f) => f.count > 0 && (!f.method || f.method === req.method));
+        if (failure) {
+            failure.count--;
+            return send(res, failure.status, { message: failure.message }, failure.headers);
+        }
         const token = (req.headers.authorization ?? "").replace(/^Bearer /, "");
         const login = users.find((u) => token === `tok-${u}`);
         if (!login) return send(res, 401, { message: "Bad credentials" });
@@ -180,6 +186,7 @@ export function createFakeGitHub({ repos = { "acme/channels": {} }, users = ["na
             if (req.method === "PATCH") {
                 const { state } = await readJson(req);
                 if (state) issue.state = state;
+                setImmediate(() => emit(issue.repo, issue.number));
                 return send(res, 200, issueJson(issue));
             }
         }
@@ -209,6 +216,11 @@ export function createFakeGitHub({ repos = { "acme/channels": {} }, users = ["na
                 setImmediate(() => emit(comment.repo, comment.issue));
                 return send(res, 204);
             }
+        }
+        if ((match = /^\/issues\/comments\/(\d+)\/reactions$/.exec(rest)) && req.method === "GET") {
+            const content = url.searchParams.get("content");
+            const list = reactions.filter((r) => r.commentId === Number(match[1]) && (!content || r.content === content));
+            return sendList(req, res, url, list.map((r) => ({ id: r.id, content: r.content, user: { login: r.user }, created_at: r.created_at })));
         }
         if ((match = /^\/issues\/comments\/(\d+)\/reactions$/.exec(rest)) && req.method === "POST") {
             const comment = findComment(match[1]);
@@ -240,6 +252,15 @@ export function createFakeGitHub({ repos = { "acme/channels": {} }, users = ["na
         stats,
         addIssue,
         addComment,
+        // Makes the next `count` requests (optionally only of `method`) fail with the given response.
+        failNext(count, { status, message = "", headers = {}, method } = {}) {
+            failures.push({ count, status, message, headers, method });
+        },
+        closeIssue(number, repo = Object.keys(repos)[0]) {
+            const issue = issues.find((i) => i.repo === repoInfo(repo).name && i.number === number);
+            issue.state = "closed";
+            setImmediate(() => emit(issue.repo, issue.number));
+        },
         get url() {
             return baseUrl;
         },

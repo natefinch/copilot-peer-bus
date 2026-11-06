@@ -28,13 +28,38 @@ export function defaultTokenProvider(env = process.env) {
     return env.PEER_BUS_GITHUB_TOKEN ? async () => env.PEER_BUS_GITHUB_TOKEN : ghCliToken;
 }
 
+const MINUTE = 60_000;
+
+// How long to wait before retrying a rate-limited request, or null if the response isn't a rate limit.
+// Follows GitHub's guidance: honor Retry-After, wait for the reset when the primary limit is exhausted,
+// and otherwise back off at least a minute (exponentially) for secondary limits.
+export function rateLimitDelay(status, headers, message, attempt, now = Date.now()) {
+    if (status !== 403 && status !== 429) return null;
+    const retryAfter = Number(headers.get("retry-after"));
+    if (retryAfter > 0) return retryAfter * 1000;
+    if (headers.get("x-ratelimit-remaining") === "0") {
+        const reset = Number(headers.get("x-ratelimit-reset"));
+        if (reset > 0) return Math.max(reset * 1000 - now, 0) + 1000;
+    }
+    if (status === 429 || /rate limit|abuse/i.test(message ?? "")) return MINUTE * 2 ** attempt;
+    return null;
+}
+
 function nextLink(header) {
     return /<([^>]+)>;\s*rel="next"/.exec(header ?? "")?.[1] ?? null;
 }
 
 export class GitHub {
-    constructor({ tokenProvider = defaultTokenProvider(), apiUrl = "https://api.github.com", fetchImpl = globalThis.fetch } = {}) {
-        Object.assign(this, { tokenProvider, apiUrl: apiUrl.replace(/\/+$/, ""), fetchImpl });
+    // maxRateLimitWaitMs caps the total time one request waits out rate limits before failing.
+    constructor({
+        tokenProvider = defaultTokenProvider(),
+        apiUrl = "https://api.github.com",
+        fetchImpl = globalThis.fetch,
+        sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+        onRateLimit = () => {},
+        maxRateLimitWaitMs = 3 * MINUTE,
+    } = {}) {
+        Object.assign(this, { tokenProvider, apiUrl: apiUrl.replace(/\/+$/, ""), fetchImpl, sleep, onRateLimit, maxRateLimitWaitMs });
         this.token = null;
         this.etags = new Map();
         this.viewer = null;
@@ -46,8 +71,28 @@ export class GitHub {
         return `Bearer ${this.token}`;
     }
 
-    // Returns { status, data, link }. Throws GitHubError for non-2xx/304 responses.
-    async raw(method, pathOrUrl, { body, conditional = false } = {}) {
+    // Returns { status, data, link }. Waits out rate limits (up to maxRateLimitWaitMs in total), then throws
+    // GitHubError for non-2xx/304 responses.
+    async raw(method, pathOrUrl, options = {}) {
+        let waited = 0;
+        for (let attempt = 0; ; attempt++) {
+            try {
+                return await this.rawOnce(method, pathOrUrl, { ...options, attempt });
+            } catch (error) {
+                const delay = error.rateLimitDelay;
+                if (delay === undefined || delay === null) throw error;
+                if (waited + delay > this.maxRateLimitWaitMs) {
+                    error.message += ` GitHub rate limit: try again after ${new Date(Date.now() + delay).toLocaleTimeString()}.`;
+                    throw error;
+                }
+                waited += delay;
+                this.onRateLimit(delay);
+                await this.sleep(delay);
+            }
+        }
+    }
+
+    async rawOnce(method, pathOrUrl, { body, conditional = false, attempt = 0 } = {}) {
         const url = pathOrUrl.startsWith("http") ? pathOrUrl : `${this.apiUrl}${pathOrUrl}`;
         let response;
         for (const refresh of [false, true]) {
@@ -74,12 +119,10 @@ export class GitHub {
         const text = await response.text();
         const data = text ? JSON.parse(text) : null;
         if (!response.ok) {
-            let message = data?.message ?? `HTTP ${response.status}`;
-            if (response.status === 403 || response.status === 429) {
-                const retry = response.headers.get("retry-after");
-                if (retry) message += ` (retry after ${retry}s)`;
-            }
-            throw new GitHubError(`GitHub ${method} ${url.replace(this.apiUrl, "")} failed: ${message}`, response.status);
+            const message = data?.message ?? `HTTP ${response.status}`;
+            const error = new GitHubError(`GitHub ${method} ${url.replace(this.apiUrl, "")} failed: ${message}`, response.status);
+            error.rateLimitDelay = rateLimitDelay(response.status, response.headers, message, attempt);
+            throw error;
         }
         const etag = response.headers.get("etag");
         const link = response.headers.get("link");
@@ -130,8 +173,8 @@ export class GitHub {
         return this.request("POST", `/repos/${repo}/issues`, { title, body });
     }
 
-    getIssue(ref) {
-        return this.request("GET", this.issuePath(ref));
+    async getIssue(ref, { conditional = false } = {}) {
+        return (await this.raw("GET", this.issuePath(ref), { conditional })).data;
     }
 
     async closeIssue(ref) {
@@ -167,6 +210,10 @@ export class GitHub {
     // Returns the reaction; GitHub returns the existing one if this user already reacted with `content`.
     addReaction(repo, commentId, content) {
         return this.request("POST", `/repos/${repo}/issues/comments/${commentId}/reactions`, { content });
+    }
+
+    listReactions(repo, commentId, content) {
+        return this.paginate(`/repos/${repo}/issues/comments/${commentId}/reactions?content=${content}&per_page=100`, { conditional: true });
     }
 
     async deleteReaction(repo, commentId, reactionId) {

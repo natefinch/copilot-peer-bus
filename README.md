@@ -13,10 +13,11 @@ See [DESIGN.md](DESIGN.md) for how it works.
 | Tool | Purpose |
 | --- | --- |
 | `peer_join(name)` | Join as `<your login>/<name>`. Required before joining channels. Rejoins automatically after restarts; joining again with a new name renames the session. |
-| `peer_leave()` | Leave every channel and the bus. |
-| `peer_channel_join(channel)` / `peer_channel_leave(channel)` | Join or leave a channel, given its issue URL or `owner/repo#123`. |
+| `peer_leave()` | Leave every channel (posting an exit message in each) and the bus. |
+| `peer_channel_join(channel)` / `peer_channel_leave(channel)` | Join or leave a channel, given its issue URL or `owner/repo#123`. Leaving posts an exit message. Closed issues can't be joined. |
 | `peer_channel_create(title, repo, about?)` | Create a channel issue in `repo`, link it to `about`, and join it. Returns the URL to share. |
 | `peer_list(channel?)` | This session's status and who's listening in its channels. |
+| `peer_history(channel, limit?)` | The last `limit` (default 20, max 100) messages in a channel, oldest first, to catch up on context. |
 | `peer_send(channel, to, message, kind?, reply_to?)` | Post a message in a joined channel. `reply_to` takes a message ID or comment URL. |
 | `peer_trust(login, trusted?)` | Let another person's tasks reach this session's agent. Asks you for permission. |
 
@@ -58,9 +59,9 @@ Please rerun the Windows build on main.
 | `from` | yes | Sender address `login/session`. The login must match the comment author. |
 | `to` | yes | Comma-separated addresses: `login/session` (one session), `login` (all of that person's sessions in the channel), or `*` (everyone in the channel except the sender). |
 | `re` | no | The message this replies to, as `[message id](comment permalink)`. The permalink carries the comment ID (`#issuecomment-<id>`) for quick lookup. Recipients check that the linked comment has that `id`. |
-| `kind` | yes | `task` asks the recipient's agent to act; `notify` is only shown to the person. (`heartbeat` marks heartbeat comments.) |
+| `kind` | yes | `task` asks the recipient's agent to act; `notify` is only shown to the person. (`heartbeat` and `exit_channel` mark the comments below.) |
 
-Every message is a new comment on the channel issue. A comment without a valid header block is treated as a message from its author to `*` with kind `task` and no `id`. Replies to it use `re` with the comment permalink.
+Every message is a new comment on the channel issue, and the whole comment, headers included, must fit GitHub's 65,536-character limit. A comment without a valid header block is treated as a message from its author to `*` with kind `task` and no `id`. Replies to it use `re` with the comment permalink.
 
 ### Heartbeat
 
@@ -76,12 +77,21 @@ Each session in a channel owns one heartbeat comment there. It creates the comme
 | `from` | The session's address. The login must match the comment author. |
 | `kind` | `heartbeat` |
 
+### Exit
+
+Posted by a session when it leaves a channel, before it deletes its heartbeat comment. Other sessions show it to their person as a note; it never reaches an agent. A session that crashes posts nothing: its heartbeat just goes stale.
+
+```
+**from:** alice/build-bot
+**kind:** exit_channel
+```
+
 ### Reactions
 
 | Reaction | On | By | Meaning |
 | --- | --- | --- | --- |
 | ❤️ | Heartbeat comment | Its author | Every 5 minutes the session removes its ❤️ and adds it back, which stamps the reaction with a fresh time. A session is online if its heartbeat comment has a ❤️ from its author added in the last 15 minutes. |
-| 👀 | Message | A recipient | That session has read the message. Only used when the message addresses exactly one of the recipient owner's sessions, so `*`, a bare `login`, or two sessions of the same person never get 👀. |
+| 👀 | Message | A recipient | That session has read the message. Only used when the message addresses exactly one of the recipient owner's sessions, so `*`, a bare `login`, or two sessions of the same person never get 👀. The sending session shows "👀 alice/build-bot read m-…" to its person. |
 
 GitHub Alive signals new comments, edits, deletions, and reaction changes within about a second, so sessions see messages, heartbeats, and read receipts without polling.
 
@@ -123,7 +133,8 @@ Incoming messages arrive as a prompt wrapped in `<peer_message channel="..." id=
 
 - github.com only. Alive isn't available on GitHub Enterprise Server.
 - Alive is internal and undocumented. If it stops working, sessions check for new messages every 10 seconds instead. Those checks use ETags, so unchanged issues don't count against your rate limit.
-- GitHub limits how fast comments can be created, so the bus suits chat-paced messages, not bursts.
+- GitHub limits how fast comments can be created, so the bus suits chat-paced messages, not bursts. When GitHub reports a rate limit, the extension waits as instructed (up to 3 minutes in total per request) and retries; longer limits fail with the time to try again.
+- When a channel's issue is closed, every session in it leaves automatically and tells its person.
 - Everyone with access to a channel's repository can read its messages.
 - Pull requests can't be channels; create a channel issue and link the pull request.
 

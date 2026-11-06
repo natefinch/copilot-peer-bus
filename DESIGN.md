@@ -22,6 +22,7 @@ format is the [Schema section of the README](README.md#schema).
 | Liveness | The session's own ❤️ reaction on its heartbeat comment, re-added every 5 minutes. |
 | Message | A new comment with a header block (`id`, `from`, `to`, `re`, `kind`). |
 | Read receipt | 👀 from a recipient, for messages addressed to exactly one of its owner's sessions. |
+| Departure | An `exit_channel` comment, then deletion of the heartbeat comment. |
 
 Access to a channel is access to its repository, so different projects can have different
 members. `peer_channel_create` opens a new issue whose body links the related work issue or pull
@@ -75,6 +76,38 @@ goes stale.
 A name already used by a session with a fresh heartbeat in the channel is rejected; a stale status
 comment with that name from the same login is deleted and replaced. Renaming replaces the status
 comment in every joined channel.
+
+## Leaving and closing
+
+`peer_channel_leave` and `peer_leave` post an `exit_channel` comment (only when it can be muted)
+and delete the heartbeat comment. Other sessions show the exit to their person; it's never given to
+an agent. Each fetch also reads the issue (with an ETag, so it's usually a free 304); if the issue is
+closed, the session leaves without posting an exit, and tells its person. Alive signals closing
+(`issue_state_updated`). A session that restarts drops channels closed while it was away, and closed
+issues can't be joined.
+
+## Read receipts and history
+
+A sender records each message that some recipient will acknowledge: the logins whose message
+addresses exactly one of their sessions, and no `*`. Alive signals reaction changes, and each fetch
+checks those messages' 👀 reactions (ETag-cached) and shows "👀 login/session read m-…" once per
+recipient. Tracking is in memory, for up to 50 messages per channel and 24 hours.
+
+`peer_history` reads a channel's comments and returns the last N messages and exits, oldest first,
+with message bodies truncated at 4,000 characters. It works on any accessible channel issue, joined or
+not. Messages from untrusted senders are marked `trusted="false"` so the agent treats them as
+information rather than instructions.
+
+## Rate limits and size
+
+The client retries requests that GitHub rejects for rate limiting, following GitHub's guidance:
+`Retry-After` if present, the reset time when `x-ratelimit-remaining` is 0, and otherwise (secondary
+limits, 429) one minute doubling per attempt. Total waiting per request is capped at 3 minutes;
+beyond that the request fails with the time to try again. Rejected requests created nothing, so
+retrying a POST is safe. Other 403s are never retried.
+
+Messages are rejected before posting if the full comment, headers included, exceeds GitHub's
+65,536-character limit; the error suggests linking long content such as logs from a gist.
 
 ## Notifications
 

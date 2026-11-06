@@ -88,6 +88,7 @@ test("extension: join, create a channel, message by URL, reply, and rejoin after
         "peer_channel_create",
         "peer_channel_leave",
         "peer_list",
+        "peer_history",
         "peer_send",
         "peer_trust",
     ]);
@@ -122,6 +123,11 @@ test("extension: join, create a channel, message by URL, reply, and rejoin after
     await waitFor(() => winAgain.prompts().length === 1);
     assert.match(winAgain.prompts()[0], /sent while you were away/);
 
+    const history = await winAgain.call("peer_history", { channel: url, limit: 2 });
+    assert.match(history, /the last 2 of 3 messages, oldest first/);
+    assert.match(history, /done, all green[\s\S]*sent while you were away/);
+
     assert.match(await winAgain.call("peer_leave"), /Left the peer bus \(was natefinch\/win\)/);
+    await waitFor(() => mac.events.some((e) => e.type === "log" && /👋 natefinch\/win left/.test(e.message)));
     assert.doesNotMatch(await mac.call("peer_list"), /natefinch\/win/);
 });

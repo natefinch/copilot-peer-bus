@@ -19,7 +19,10 @@ function log(text, level = "info") {
 }
 
 const bus = new PeerBus({
-    github: new GitHub({ apiUrl: env.PEER_BUS_API_URL || undefined }),
+    github: new GitHub({
+        apiUrl: env.PEER_BUS_API_URL || undefined,
+        onRateLimit: (ms) => log(`GitHub rate limit reached; retrying in ${Math.ceil(ms / 1000)}s`, "warning"),
+    }),
     store: new SessionStore(env.SESSION_ID ?? "unknown-session"),
     deliver: (prompt) => session.send({ prompt }).catch((e) => log(`could not deliver a message: ${e.message}`, "error")),
     notify: (text) => session.log(text, { level: "info" }).catch(() => {}),
@@ -55,7 +58,7 @@ const tools = [
     },
     {
         name: "peer_leave",
-        description: "Leave the peer bus: leave every channel and stop rejoining automatically.",
+        description: "Leave the peer bus: post an exit message in every channel, leave them, and stop rejoining automatically.",
         parameters: { type: "object", properties: {} },
         skipPermission: true,
         handler: async () => {
@@ -100,7 +103,7 @@ const tools = [
     },
     {
         name: "peer_channel_leave",
-        description: "Leave a peer-bus channel. Deletes this session's heartbeat comment there.",
+        description: "Leave a peer-bus channel: posts an exit message there and deletes this session's heartbeat comment.",
         parameters: { type: "object", properties: { channel: { type: "string", description: CHANNEL_DESCRIPTION } }, required: ["channel"] },
         skipPermission: true,
         handler: async ({ channel }) => {
@@ -126,6 +129,22 @@ const tools = [
             }
             return lines.join("\n");
         },
+    },
+    {
+        name: "peer_history",
+        description:
+            "Read recent messages in a peer-bus channel, oldest first, to catch up on context (for example after joining late or " +
+            "after /clear). Works for any channel issue you can access. Messages from untrusted senders are marked trusted=\"false\".",
+        parameters: {
+            type: "object",
+            properties: {
+                channel: { type: "string", description: CHANNEL_DESCRIPTION },
+                limit: { type: "number", description: "How many recent messages to return (1-100, default 20)." },
+            },
+            required: ["channel"],
+        },
+        skipPermission: true,
+        handler: async ({ channel, limit }) => bus.history({ channel, limit }),
     },
     {
         name: "peer_send",
