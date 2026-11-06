@@ -39,7 +39,7 @@ function waitFor(predicate, timeoutMs = 5000) {
 }
 
 async function launchExtension(sessionId, login) {
-    const { PEER_BUS_REPO: _r, PEER_BUS_GITHUB_TOKEN: _t, ...baseEnv } = process.env;
+    const { PEER_BUS_GITHUB_TOKEN: _t, ...baseEnv } = process.env;
     const child = fork(path.join(root, ".github", "extensions", "peer-bus", "extension.mjs"), {
         execArgv: ["--import", path.join(root, "test", "fixtures", "register-fake-sdk.mjs")],
         env: {
@@ -78,11 +78,10 @@ async function launchExtension(sessionId, login) {
     return { child, call, prompts, events };
 }
 
-test("extension: configure, join, message across sessions, and rejoin after restart", async () => {
+test("extension: join, create a channel, message by URL, reply, and rejoin after restart", async () => {
     const mac = await launchExtension("session-mac", "natefinch");
     const win = await launchExtension("session-win", "natefinch");
     assert.deepEqual(mac.events.find((e) => e.type === "joined").tools, [
-        "peer_configure",
         "peer_join",
         "peer_leave",
         "peer_channel_join",
@@ -93,39 +92,33 @@ test("extension: configure, join, message across sessions, and rejoin after rest
         "peer_trust",
     ]);
 
-    await assert.rejects(mac.call("peer_join", { name: "mac" }), /peer_configure/);
-    assert.match(await mac.call("peer_configure", { repo: fake.repo }), /Configured the peer bus on acme\/bus \(private\) as natefinch\. Stopped watching/);
-    assert.deepEqual(fake.unwatched, ["natefinch"]);
-    await win.call("peer_configure", { repo: fake.repo });
-
-    assert.match(await mac.call("peer_join", { name: "mac", default: true }), /Joined the peer bus as natefinch\/mac \(default session\)/);
+    await assert.rejects(mac.call("peer_channel_join", { channel: "acme/channels#1" }), /Call peer_join/);
+    assert.match(await mac.call("peer_join", { name: "mac" }), /Joined the peer bus as natefinch\/mac/);
     await win.call("peer_join", { name: "win" });
+
+    const created = await mac.call("peer_channel_create", { title: "Windows smoke tests", repo: "acme/channels", about: "acme/channels#99" });
+    const url = /Share this URL so other sessions can join: (\S+)$/.exec(created)[1];
     await assert.rejects(win.call("peer_channel_join", { channel: "release" }), /Invalid channel/);
-    const created = await mac.call("peer_channel_create", { title: "Windows smoke tests", about: "acme/bus#1" });
-    const url = /Share this URL so other sessions can join: (\S+)\.$/.exec(created)[1];
-    assert.match(await win.call("peer_channel_join", { channel: url }), /Joined "Windows smoke tests" \(https:\/\/github\.com\/acme\/bus\/issues\/\d+\)\..*Use channel="acme\/bus#\d+" with peer_send/);
-    await mac.call("peer_send", { to: "*", channel: url, message: "smoke tests please" });
-    await waitFor(() => win.prompts().length === 1);
-    assert.match(win.prompts()[0], /smoke tests please/);
+    assert.match(await win.call("peer_channel_join", { channel: url }), /^Joined "Windows smoke tests" \(https:\/\/github\.com\/acme\/channels\/issues\/1\)\.$/);
 
     const list = await mac.call("peer_list");
-    assert.match(list, /This session: natefinch\/mac \(default\) · push polling/);
-    assert.match(list, /- natefinch\/win: .*· acme\/bus#\d+/);
-    assert.match(list, /- "Windows smoke tests" \(https:\/\/github\.com\/acme\/bus\/issues\/\d+\): 2 online/);
+    assert.match(list, /This session: natefinch\/mac · push polling/);
+    assert.match(list, /- natefinch\/mac \(this session\): \S+ \(\w+\)/);
+    assert.match(list, /- natefinch\/win: /);
 
-    assert.match(
-        await mac.call("peer_send", { to: "natefinch/win", message: "please run the test suite" }),
-        /^Sent: https:\/\/github\.com\/acme\/bus\/issues\/\d+#issuecomment-\d+$/
-    );
-    await waitFor(() => win.prompts().length === 2);
-    assert.match(win.prompts()[1], /from="natefinch\/mac" to="natefinch\/win"[\s\S]*please run the test suite/);
+    const sent = await mac.call("peer_send", { channel: url, to: "natefinch/win", message: "please run the test suite" });
+    const [, id, commentUrl] = /^Sent (m-[a-z0-9]{8}): (\S+)$/.exec(sent);
+    await waitFor(() => win.prompts().length === 1);
+    assert.match(win.prompts()[0], new RegExp(`id="${id}" comment="${commentUrl}" from="natefinch/mac" to="natefinch/win"[\\s\\S]*please run the test suite`));
+    await waitFor(() => fake.reactions.some((r) => r.content === "eyes"));
 
-    assert.match(await win.call("peer_send", { to: "natefinch", message: "done, all green" }), /^Sent:/);
+    await win.call("peer_send", { channel: url, to: "natefinch/mac", message: "done, all green", reply_to: id });
     await waitFor(() => mac.prompts().length === 1);
+    assert.match(mac.prompts()[0], new RegExp(`re="${id}"`));
 
     win.child.kill();
     await new Promise((resolve) => win.child.once("exit", resolve));
-    await mac.call("peer_send", { to: "natefinch/win", message: "sent while you were away" });
+    await mac.call("peer_send", { channel: url, to: "natefinch/win", message: "sent while you were away" });
     const winAgain = await launchExtension("session-win", "natefinch");
     await waitFor(() => winAgain.prompts().length === 1);
     assert.match(winAgain.prompts()[0], /sent while you were away/);

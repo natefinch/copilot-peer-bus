@@ -7,29 +7,30 @@ import { issueKey } from "../../.github/extensions/peer-bus/protocol.mjs";
 
 const iso = (ms = Date.now()) => new Date(Math.floor(ms / 1000) * 1000).toISOString().replace(".000Z", "Z");
 
-// repos: extra repositories beyond the bus repo, e.g. { "acme/app": { members: ["natefinch"] } } (members omitted = everyone).
-export function createFakeGitHub({ repo = "acme/bus", repos = {}, users = ["natefinch", "alice", "bob"], isPrivate = true, scopes = null } = {}) {
-    const allRepos = { [repo]: { private: isPrivate }, ...repos };
+// repos: { "acme/app": { members: ["natefinch"] } } (members omitted = everyone has access).
+// scopes: the X-OAuth-Scopes header value; null omits the header (like a fine-grained token).
+export function createFakeGitHub({ repos = { "acme/channels": {} }, users = ["natefinch", "alice", "bob"], scopes = "repo, notifications" } = {}) {
+    const issues = [];
+    const comments = [];
+    const reactions = [];
+    const mutes = [];
+    const listeners = new Set();
+    const stats = { requests: 0, notModified: 0 };
+    let nextComment = 1000;
+    let nextReaction = 1;
+    let baseUrl = "";
+    const hasNotifications = scopes === null || scopes.split(",").map((s) => s.trim()).includes("notifications");
+
     const repoInfo = (fullName) => {
-        const match = Object.keys(allRepos).find((r) => r.toLowerCase() === String(fullName).toLowerCase());
-        return match ? { name: match, ...allRepos[match] } : null;
+        const match = Object.keys(repos).find((r) => r.toLowerCase() === String(fullName).toLowerCase());
+        return match ? { name: match, ...repos[match] } : null;
     };
     const canAccess = (login, fullName) => {
         const info = repoInfo(fullName);
         return Boolean(info && (!info.members || info.members.includes(login)));
     };
-    const issues = [];
-    const comments = [];
-    const unsubscribed = [];
-    const unwatched = [];
-    const listeners = new Set();
-    const stats = { requests: 0, notModified: 0 };
-    let nextComment = 1000;
-    let baseUrl = "";
-
-    const keyOf = (r, number) => `${r.toLowerCase()}#${number}`;
-    const emit = (r, number) => {
-        for (const listener of listeners) listener(keyOf(r, number));
+    const emit = (repo, number) => {
+        for (const listener of listeners) listener(issueKey({ repo, number }));
     };
     const issueJson = (issue) => ({
         number: issue.number,
@@ -42,6 +43,7 @@ export function createFakeGitHub({ repo = "acme/bus", repos = {}, users = ["nate
         html_url: `https://github.com/${issue.repo}/issues/${issue.number}`,
         comments: comments.filter((c) => c.repo === issue.repo && c.issue === issue.number).length,
     });
+    const commentUrl = (c) => `https://github.com/${c.repo}/issues/${c.issue}#issuecomment-${c.id}`;
     const commentJson = (c) => ({
         id: c.id,
         node_id: `IC_${c.id}`,
@@ -49,27 +51,27 @@ export function createFakeGitHub({ repo = "acme/bus", repos = {}, users = ["nate
         user: { login: c.author },
         created_at: c.created_at,
         updated_at: c.updated_at,
-        html_url: `https://github.com/${c.repo}/issues/${c.issue}#issuecomment-${c.id}`,
+        html_url: commentUrl(c),
     });
 
-    function addIssue(author, title, body = "", inRepo = repo, { pull = false } = {}) {
-        const fullName = repoInfo(inRepo).name;
+    function addIssue(author, title, body = "", repo = Object.keys(repos)[0], { pull = false } = {}) {
+        const fullName = repoInfo(repo).name;
         const number = issues.filter((i) => i.repo === fullName).length + 1;
         const issue = { repo: fullName, number, title, body, author, state: "open", pull };
         issues.push(issue);
         return issueJson(issue);
     }
 
-    function addComment(author, number, body, inRepo = repo) {
+    function addComment(author, number, body, repo = Object.keys(repos)[0]) {
         const now = iso();
-        const comment = { id: nextComment++, repo: repoInfo(inRepo).name, issue: number, author, body, created_at: now, updated_at: now };
+        const comment = { id: nextComment++, repo: repoInfo(repo).name, issue: number, author, body, created_at: now, updated_at: now };
         comments.push(comment);
         setImmediate(() => emit(comment.repo, number));
         return commentJson(comment);
     }
 
     function send(res, status, value, headers = {}) {
-        res.writeHead(status, { "Content-Type": "application/json", ...headers });
+        res.writeHead(status, { "Content-Type": "application/json", ...(scopes === null ? {} : { "X-OAuth-Scopes": scopes }), ...headers });
         res.end(value === undefined ? "" : JSON.stringify(value));
     }
 
@@ -90,14 +92,61 @@ export function createFakeGitHub({ repo = "acme/bus", repos = {}, users = ["nate
             res.writeHead(304, { ETag: etag });
             return res.end();
         }
-        res.writeHead(200, { "Content-Type": "application/json", ETag: etag, ...headers });
-        res.end(body);
+        return send(res, 200, slice, { ETag: etag, ...headers });
     }
 
     async function readJson(req) {
         const chunks = [];
         for await (const chunk of req) chunks.push(chunk);
         return chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : {};
+    }
+
+    async function graphql(req, res, login) {
+        const { query, variables } = await readJson(req);
+        if (query.includes("updateSubscription")) {
+            if (!hasNotifications) {
+                return send(res, 200, { errors: [{ type: "INSUFFICIENT_SCOPES", message: "requires one of the following scopes: ['notifications']" }] });
+            }
+            mutes.push({ login, id: variables.id, state: variables.state });
+            return send(res, 200, { data: { updateSubscription: { clientMutationId: null } } });
+        }
+        if (query.includes("reactions(content: HEART")) {
+            const fullName = `${variables.owner}/${variables.name}`;
+            if (!canAccess(login, fullName)) return send(res, 200, { data: { repository: null }, errors: [{ message: "Could not resolve" }] });
+            const repo = repoInfo(fullName).name;
+            const nodes = comments
+                .filter((c) => c.repo === repo && c.issue === variables.number)
+                .sort((a, b) => a.id - b.id)
+                .map((c) => ({
+                    databaseId: c.id,
+                    body: c.body,
+                    url: commentUrl(c),
+                    createdAt: c.created_at,
+                    author: { login: c.author },
+                    reactions: { nodes: reactions.filter((r) => r.commentId === c.id && r.content === "heart").map((r) => ({ createdAt: r.created_at, user: { login: r.user } })) },
+                }));
+            return send(res, 200, { data: { repository: { issue: { comments: { pageInfo: { hasNextPage: false, endCursor: null }, nodes } } } } });
+        }
+        if (query.includes("updatesChannel")) {
+            const data = {};
+            const errors = [];
+            const segments = query.split(/\b(r\d+): repository\(owner: "([^"]+)", name: "([^"]+)"\)/);
+            for (let k = 1; k < segments.length; k += 4) {
+                const [alias, fullName, body] = [segments[k], `${segments[k + 1]}/${segments[k + 2]}`, segments[k + 3]];
+                if (!canAccess(login, fullName)) {
+                    data[alias] = null;
+                    errors.push({ message: `Could not resolve to a Repository with the name '${fullName}'.` });
+                    continue;
+                }
+                data[alias] = {};
+                for (const [, issueAlias, number] of body.matchAll(/(i\d+): issue\(number: (\d+)\)/g)) {
+                    const payload = Buffer.from(JSON.stringify({ c: `issue:${issueKey({ repo: fullName, number })}`, t: 1 })).toString("base64");
+                    data[alias][issueAlias] = { updatesChannel: `${payload}--sig` };
+                }
+            }
+            return send(res, 200, errors.length ? { data, errors } : { data });
+        }
+        return send(res, 200, { errors: [{ message: "unsupported query" }] });
     }
 
     const server = http.createServer(async (req, res) => {
@@ -109,68 +158,23 @@ export function createFakeGitHub({ repo = "acme/bus", repos = {}, users = ["nate
         const path = url.pathname;
         let match;
 
-        if (req.method === "GET" && path === "/user") return send(res, 200, { login }, scopes === null ? {} : { "X-OAuth-Scopes": scopes });
+        if (req.method === "GET" && path === "/user") return send(res, 200, { login });
         if (req.method === "GET" && path === "/alive_internal/websocket-url") return send(res, 200, { url: "ws://fake-alive" });
-        if (req.method === "POST" && path === "/graphql") {
-            const { query, variables } = await readJson(req);
-            if (query.includes("updateSubscription")) {
-                unsubscribed.push({ login, id: variables.id });
-                return send(res, 200, { data: { updateSubscription: { clientMutationId: null } } });
-            }
-            if (query.includes("issues(first: 100")) {
-                const listed = `${variables.owner}/${variables.name}`;
-                if (!canAccess(login, listed)) return send(res, 200, { data: { repository: null }, errors: [{ message: "Could not resolve" }] });
-                const nodes = issues
-                    .filter((i) => i.state === "open" && i.repo.toLowerCase() === listed.toLowerCase())
-                    .sort((a, b) => a.number - b.number)
-                    .map((i) => {
-                        const json = issueJson(i);
-                        return { number: json.number, title: json.title, id: json.node_id, url: json.html_url, author: { login: i.author } };
-                    });
-                return send(res, 200, { data: { repository: { issues: { pageInfo: { hasNextPage: false, endCursor: null }, nodes } } } });
-            }
-            if (query.includes("updatesChannel")) {
-                const data = {};
-                const errors = [];
-                const segments = query.split(/\b(r\d+): repository\(owner: "([^"]+)", name: "([^"]+)"\)/);
-                for (let k = 1; k < segments.length; k += 4) {
-                    const [alias, fullName, body] = [segments[k], `${segments[k + 1]}/${segments[k + 2]}`, segments[k + 3]];
-                    if (!canAccess(login, fullName)) {
-                        data[alias] = null;
-                        errors.push({ message: `Could not resolve to a Repository with the name '${fullName}'.` });
-                        continue;
-                    }
-                    data[alias] = {};
-                    for (const [, issueAlias, number] of body.matchAll(/(i\d+): issue\(number: (\d+)\)/g)) {
-                        const payload = Buffer.from(JSON.stringify({ c: `issue:${keyOf(fullName, number)}`, t: 1 })).toString("base64");
-                        data[alias][issueAlias] = { updatesChannel: `${payload}--sig` };
-                    }
-                }
-                return send(res, 200, errors.length ? { data, errors } : { data });
-            }
-            return send(res, 200, { errors: [{ message: "unsupported query" }] });
-        }
+        if (req.method === "POST" && path === "/graphql") return graphql(req, res, login);
+
         const repoMatch = /^\/repos\/([^/]+\/[^/]+)(.*)$/.exec(path);
         if (!repoMatch || !canAccess(login, repoMatch[1])) return send(res, 404, { message: "Not Found" });
-        const current = repoInfo(repoMatch[1]);
+        const repo = repoInfo(repoMatch[1]).name;
         const rest = repoMatch[2];
-        const inRepo = (i) => i.repo === current.name;
+        const findIssue = (number) => issues.find((i) => i.repo === repo && i.number === Number(number));
+        const findComment = (id) => comments.find((c) => c.repo === repo && c.id === Number(id));
 
-        if (req.method === "GET" && rest === "") return send(res, 200, { full_name: current.name, private: current.private !== false });
-        if (req.method === "DELETE" && rest === "/subscription") {
-            unwatched.push(login);
-            return send(res, 204);
-        }
-        if (req.method === "GET" && rest === "/issues") {
-            const open = issues.filter((i) => inRepo(i) && i.state === "open").sort((a, b) => b.number - a.number);
-            return sendList(req, res, url, open.map(issueJson));
-        }
         if (req.method === "POST" && rest === "/issues") {
             const { title, body } = await readJson(req);
-            return send(res, 201, addIssue(login, title, body, current.name));
+            return send(res, 201, addIssue(login, title, body, repo));
         }
         if ((match = /^\/issues\/(\d+)$/.exec(rest))) {
-            const issue = issues.find((i) => inRepo(i) && i.number === Number(match[1]));
+            const issue = findIssue(match[1]);
             if (!issue) return send(res, 404, { message: "Not Found" });
             if (req.method === "GET") return send(res, 200, issueJson(issue));
             if (req.method === "PATCH") {
@@ -181,44 +185,58 @@ export function createFakeGitHub({ repo = "acme/bus", repos = {}, users = ["nate
         }
         if ((match = /^\/issues\/(\d+)\/comments$/.exec(rest))) {
             const number = Number(match[1]);
-            if (!issues.some((i) => inRepo(i) && i.number === number)) return send(res, 404, { message: "Not Found" });
+            if (!findIssue(number)) return send(res, 404, { message: "Not Found" });
             if (req.method === "GET") {
                 const since = url.searchParams.get("since");
                 const list = comments
-                    .filter((c) => c.repo === current.name && c.issue === number && (!since || Date.parse(c.updated_at) >= Date.parse(since)))
+                    .filter((c) => c.repo === repo && c.issue === number && (!since || Date.parse(c.updated_at) >= Date.parse(since)))
                     .sort((a, b) => a.id - b.id);
                 return sendList(req, res, url, list.map(commentJson));
             }
             if (req.method === "POST") {
                 const { body } = await readJson(req);
-                return send(res, 201, addComment(login, number, body, current.name));
+                return send(res, 201, addComment(login, number, body, repo));
             }
         }
         if ((match = /^\/issues\/comments\/(\d+)$/.exec(rest))) {
-            const comment = comments.find((c) => c.repo === current.name && c.id === Number(match[1]));
+            const comment = findComment(match[1]);
             if (!comment) return send(res, 404, { message: "Not Found" });
+            if (req.method === "GET") return send(res, 200, commentJson(comment));
             if (comment.author !== login) return send(res, 403, { message: "Forbidden" });
-            if (req.method === "PATCH") {
-                comment.body = (await readJson(req)).body;
-                comment.updated_at = iso();
-                setImmediate(() => emit(comment.repo, comment.issue));
-                return send(res, 200, commentJson(comment));
-            }
             if (req.method === "DELETE") {
                 comments.splice(comments.indexOf(comment), 1);
+                for (let i = reactions.length - 1; i >= 0; i--) if (reactions[i].commentId === comment.id) reactions.splice(i, 1);
                 setImmediate(() => emit(comment.repo, comment.issue));
                 return send(res, 204);
             }
+        }
+        if ((match = /^\/issues\/comments\/(\d+)\/reactions$/.exec(rest)) && req.method === "POST") {
+            const comment = findComment(match[1]);
+            if (!comment) return send(res, 404, { message: "Not Found" });
+            const { content } = await readJson(req);
+            const existing = reactions.find((r) => r.commentId === comment.id && r.user === login && r.content === content);
+            if (existing) return send(res, 200, { id: existing.id, content, user: { login } });
+            const reaction = { id: nextReaction++, commentId: comment.id, user: login, content, created_at: new Date().toISOString() };
+            reactions.push(reaction);
+            setImmediate(() => emit(comment.repo, comment.issue));
+            return send(res, 201, { id: reaction.id, content, user: { login } });
+        }
+        if ((match = /^\/issues\/comments\/(\d+)\/reactions\/(\d+)$/.exec(rest)) && req.method === "DELETE") {
+            const comment = findComment(match[1]);
+            const index = reactions.findIndex((r) => r.commentId === Number(match[1]) && r.id === Number(match[2]) && r.user === login);
+            if (!comment || index === -1) return send(res, 404, { message: "Not Found" });
+            reactions.splice(index, 1);
+            setImmediate(() => emit(comment.repo, comment.issue));
+            return send(res, 204);
         }
         return send(res, 404, { message: "Not Found" });
     });
 
     return {
-        repo,
         issues,
         comments,
-        unsubscribed,
-        unwatched,
+        reactions,
+        mutes,
         stats,
         addIssue,
         addComment,

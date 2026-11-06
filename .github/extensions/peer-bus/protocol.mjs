@@ -1,27 +1,38 @@
-// Wire format for peer-bus issues and comments. Pure functions; no I/O.
+// Wire format for peer-bus comments (see the Schema section of README.md). Pure functions; no I/O.
+//
+// Every bus comment starts with a header block: one "**key:** value" per line, ended by the first blank
+// line. The rest is the body. The comment's GitHub author is the only trusted identity.
+
+import { randomBytes } from "node:crypto";
 
 export const SESSION_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const LOGIN = "[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})";
-const INBOX_TITLE = new RegExp(`^\\[peer-bus\\] inbox: @(${LOGIN})$`);
-const ADDRESS = new RegExp(`^@?(${LOGIN})(?:/([A-Za-z0-9][A-Za-z0-9._-]{0,63}))?$`);
-const MARKER = /<!--\s*peer-bus:v1\s+(\{[\s\S]*?\})\s*-->/g;
+const SESSION = "[A-Za-z0-9][A-Za-z0-9._-]{0,63}";
+const ADDRESS = new RegExp(`^(${LOGIN})(?:/(${SESSION}))?$`);
+const SENDER = new RegExp(`^(${LOGIN})/(${SESSION})$`);
 const REPO_PART = "[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}";
 export const REPO = new RegExp(`^${REPO_PART}$`);
-export const ISSUE_KEY = new RegExp(`^(${REPO_PART})#(\\d+)$`);
+const ISSUE_KEY = new RegExp(`^(${REPO_PART})#(\\d+)$`);
 const ISSUE_URL = /^https:\/\/github\.com\/([A-Za-z0-9-]+\/[A-Za-z0-9._-]+)\/(issues|pull)\/(\d+)(?:[/?#].*)?$/i;
+export const COMMENT_URL = /^https:\/\/github\.com\/([A-Za-z0-9-]+\/[A-Za-z0-9._-]+)\/issues\/(\d+)#issuecomment-(\d+)$/i;
+export const MESSAGE_ID = /^m-[a-z0-9]{8}$/;
+const HEADER_LINE = /^\*\*([A-Za-z][A-Za-z0-9_-]*):\*\*[ \t]*(.*?)[ \t]*$/;
+const RE_VALUE = /^\[([^\]]*)\]\((https:\/\/[^)\s]+)\)$/;
+const ID_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789";
 
 export const sameLogin = (a, b) => typeof a === "string" && typeof b === "string" && a.toLowerCase() === b.toLowerCase();
 export const sameSession = sameLogin;
 
-// Channels are identified by issue: "owner/repo#123", with the repository lowercased so keys compare exactly.
+// --- channels ------------------------------------------------------------------------------
+
+// Channels are identified internally by "owner/repo#123", with the repository lowercased.
 export const issueKey = ({ repo, number }) => `${repo.toLowerCase()}#${number}`;
+export const issueUrl = ({ repo, number }) => `https://github.com/${repo}/issues/${number}`;
 
 export function validateRepo(repo) {
     if (typeof repo !== "string" || !REPO.test(repo)) throw new Error(`Invalid repository "${repo}". Use owner/name.`);
     return repo;
 }
-
-export const issueUrl = ({ repo, number }) => `https://github.com/${repo}/issues/${number}`;
 
 // Parses a channel reference: a github.com issue URL or "owner/repo#123".
 export function parseChannel(text) {
@@ -45,13 +56,7 @@ export function describeChannel(channel) {
     return channel.title ? `"${shorten(channel.title, 80)}" (${issueUrl(channel)})` : issueUrl(channel);
 }
 
-export const inboxTitle = (login) => `[peer-bus] inbox: @${login}`;
-
-export function parseTitle(title) {
-    const match = INBOX_TITLE.exec(title ?? "");
-    if (match) return { type: "inbox", login: match[1] };
-    return null;
-}
+// --- addresses -----------------------------------------------------------------------------
 
 export function validateSessionName(name) {
     if (typeof name !== "string" || !SESSION_NAME.test(name)) {
@@ -64,7 +69,7 @@ export function parseAddress(text) {
     const trimmed = String(text ?? "").trim();
     if (trimmed === "*") return { kind: "all" };
     const match = ADDRESS.exec(trimmed);
-    if (!match) throw new Error(`Invalid address "${text}". Use "login", "login/session", or "*".`);
+    if (!match) throw new Error(`Invalid address "${text}". Use "login/session", "login", or "*" (no @).`);
     return match[2] ? { kind: "session", login: match[1], session: match[2] } : { kind: "person", login: match[1] };
 }
 
@@ -74,112 +79,151 @@ export function formatAddress(address) {
     return `${address.login}/${address.session}`;
 }
 
-function displayAddress(address) {
-    if (address.kind === "all") return "everyone";
-    if (address.kind === "person") return `@${address.login}`;
-    return formatAddress(address);
+// --- headers -------------------------------------------------------------------------------
+
+export function newMessageId(random = randomBytes) {
+    return `m-${[...random(8)].map((byte) => ID_ALPHABET[byte % ID_ALPHABET.length]).join("")}`;
 }
 
-function marker(meta) {
-    return `<!-- peer-bus:v1 ${JSON.stringify(meta)} -->`;
-}
-
-export function encodeMessage({ login, from, to, kind, body }) {
-    const header = `**${login}/${from}** → ${to.map(displayAddress).join(", ")}${kind === "notify" ? " · notify" : ""}`;
-    return `${header}\n\n${body}\n\n${marker({ type: "message", from, to: to.map(formatAddress), kind })}`;
-}
-
-export function encodePresence({ login, session, sid, host, platform, channels, isDefault }) {
-    const where = [host, platform].filter(Boolean).join(", ");
-    const channelText = channels.length ? channels.map((c) => c.title || c.id).join(", ") : "no channels";
-    const text = `🟢 **${login}/${session}**${isDefault ? " (default)" : ""} is on the peer bus · ${where} · ${channelText}`;
-    return `${text}\n\n${marker({ type: "presence", session, sid, host, platform, channels, default: isDefault })}`;
-}
-
-function lastMarker(body) {
-    const matches = [...body.matchAll(MARKER)];
-    if (matches.length === 0) return null;
-    const last = matches.at(-1);
-    try {
-        return { meta: JSON.parse(last[1]), index: last.index };
-    } catch {
-        return null;
+// Returns { headers: Map(lowercase key -> value), body } or null when the comment doesn't start with a header block.
+export function parseHeaderBlock(text) {
+    const lines = String(text ?? "").replace(/\r\n?/g, "\n").split("\n");
+    const headers = new Map();
+    let index = 0;
+    for (; index < lines.length && lines[index].trim() !== ""; index++) {
+        const match = HEADER_LINE.exec(lines[index]);
+        if (!match) return null;
+        const key = match[1].toLowerCase();
+        if (!headers.has(key)) headers.set(key, match[2]);
     }
+    if (headers.size === 0) return null;
+    return { headers, body: lines.slice(index + 1).join("\n").trim() };
 }
 
-// Parses an issue comment into { type: "message" | "presence" | "human", ... }.
-// `defaultTo` is used for human comments without a marker.
-export function parseComment(comment, defaultTo) {
+function headerBlock(pairs) {
+    return pairs.map(([key, value]) => `**${key}:** ${value}`).join("\n");
+}
+
+// re: { id: message id or null, url: comment permalink }
+export function encodeMessage({ id, from, to, re, kind = "task", body }) {
+    const pairs = [
+        ["id", id],
+        ["from", from],
+        ["to", to.map(formatAddress).join(", ")],
+    ];
+    if (re) pairs.push(["re", `[${re.id ?? "comment"}](${re.url})`]);
+    pairs.push(["kind", kind]);
+    return `${headerBlock(pairs)}\n\n${body}`;
+}
+
+export function encodeStatus({ from, host, platform }) {
+    const where = [host || "unknown host", platform ? `(${platform})` : ""].filter(Boolean).join(" ");
+    return headerBlock([
+        ["status", "listening"],
+        ["from", from],
+        ["host", where],
+    ]);
+}
+
+function parseSender(value, author) {
+    const match = SENDER.exec(value ?? "");
+    return match && sameLogin(match[1], author) ? match[2] : null;
+}
+
+function parseRe(value) {
+    const match = RE_VALUE.exec(value ?? "");
+    if (!match) return null;
+    const url = COMMENT_URL.exec(match[2]);
+    if (!url) return null;
+    return { id: MESSAGE_ID.test(match[1]) ? match[1] : null, url: match[2], repo: url[1], commentId: Number(url[3]) };
+}
+
+// Parses an issue comment into one of:
+//   { type: "status", session, host }
+//   { type: "message", messageId, from, to, re, kind, body }
+//   { type: "human", from: null, to: [*], kind: "task", body }   (anything without a valid header block)
+export function parseComment(comment) {
     const author = comment.user?.login ?? "";
-    const base = { id: comment.id, author, url: comment.html_url, createdAt: comment.created_at, updatedAt: comment.updated_at };
-    const body = comment.body ?? "";
-    const found = lastMarker(body);
-    if (found?.meta?.type === "presence" && SESSION_NAME.test(found.meta.session ?? "")) {
-        const { session, sid = "", host = "", platform = "", channels = [], default: isDefault = false } = found.meta;
-        return {
-            ...base,
-            type: "presence",
-            session,
-            sid: String(sid),
-            host: String(host),
-            platform: String(platform),
-            channels: Array.isArray(channels)
-                ? channels
-                      .filter((c) => typeof c?.id === "string" && ISSUE_KEY.test(c.id))
-                      .map((c) => ({ id: c.id.toLowerCase(), title: typeof c.title === "string" ? c.title.slice(0, 200) : "" }))
-                : [],
-            isDefault: isDefault === true,
-        };
-    }
-    if (found?.meta?.type === "message" && SESSION_NAME.test(found.meta.from ?? "")) {
-        const to = [];
-        for (const text of Array.isArray(found.meta.to) ? found.meta.to : []) {
-            try {
-                to.push(parseAddress(text));
-            } catch {
-                // ignore malformed addresses
+    const base = { commentId: comment.id, author, url: comment.html_url, createdAt: comment.created_at };
+    const raw = comment.body ?? "";
+    const parsed = parseHeaderBlock(raw);
+    if (parsed) {
+        const { headers, body } = parsed;
+        const from = parseSender(headers.get("from"), author);
+        if (from && headers.get("status") === "listening") {
+            return { ...base, type: "status", session: from, host: headers.get("host") ?? "" };
+        }
+        if (from && MESSAGE_ID.test(headers.get("id") ?? "")) {
+            const to = [];
+            for (const text of (headers.get("to") ?? "").split(",")) {
+                try {
+                    to.push(parseAddress(text));
+                } catch {
+                    // ignore malformed addresses
+                }
+            }
+            if (to.length > 0) {
+                return {
+                    ...base,
+                    type: "message",
+                    messageId: headers.get("id"),
+                    from,
+                    to,
+                    re: parseRe(headers.get("re")),
+                    kind: headers.get("kind") === "notify" ? "notify" : "task",
+                    body,
+                };
             }
         }
-        const beforeMarker = body.slice(0, found.index);
-        const headerEnd = beforeMarker.indexOf("\n\n");
-        const text = (headerEnd === -1 ? beforeMarker : beforeMarker.slice(headerEnd + 2)).trim();
-        return { ...base, type: "message", from: found.meta.from, to, kind: found.meta.kind === "notify" ? "notify" : "task", body: text };
     }
-    return { ...base, type: "human", from: null, to: defaultTo, kind: "task", body: body.trim() };
+    return { ...base, type: "human", messageId: null, from: null, to: [{ kind: "all" }], re: null, kind: "task", body: raw.trim() };
 }
 
-// me: { login, session, isDefault }
+// --- routing -------------------------------------------------------------------------------
+
+// me: { login, session }
 export function isAddressedTo(message, me) {
     if (sameLogin(message.author, me.login) && message.from && sameSession(message.from, me.session)) return false;
     return message.to.some(
         (address) =>
             address.kind === "all" ||
-            (address.kind === "person" && sameLogin(address.login, me.login) && me.isDefault) ||
+            (address.kind === "person" && sameLogin(address.login, me.login)) ||
             (address.kind === "session" && sameLogin(address.login, me.login) && sameSession(address.session, me.session))
     );
+}
+
+// A 👀 read receipt is unambiguous only when the message addresses exactly one of my owner's sessions: this one.
+export function shouldAcknowledge(message, me) {
+    const mine = message.to.filter((a) => a.kind === "all" || sameLogin(a.login, me.login));
+    return mine.length === 1 && mine[0].kind === "session" && sameSession(mine[0].session, me.session);
 }
 
 export function senderAddress(message) {
     return message.from ? `${message.author}/${message.from}` : message.author;
 }
 
+// --- prompts -------------------------------------------------------------------------------
+
 const escapeAttr = (value) => String(value).replace(/[&"<>]/g, (c) => ({ "&": "&amp;", '"': "&quot;", "<": "&lt;", ">": "&gt;" })[c]);
 const neutralize = (text) => text.replace(/<\/?peer_message/gi, (m) => m.replace("<", "&lt;"));
 
 export function formatPrompt(messages, me, { omitted = 0 } = {}) {
-    const blocks = messages.map((m) =>
-        [
-            `<peer_message where="${escapeAttr(m.where)}" from="${escapeAttr(senderAddress(m))}" to="${escapeAttr(m.to.map(formatAddress).join(", "))}" url="${escapeAttr(m.url)}">`,
-            neutralize(m.body),
-            "</peer_message>",
-        ].join("\n")
-    );
+    const blocks = messages.map((m) => {
+        const attrs = [
+            ["channel", issueUrl(m.channel)],
+            ["id", m.messageId],
+            ["comment", m.url],
+            ["from", senderAddress(m)],
+            ["to", m.to.map(formatAddress).join(", ")],
+            ["re", m.re ? m.re.id ?? m.re.url : null],
+        ].filter(([, value]) => value);
+        const note = m.reNote ? `\n(${m.reNote})` : "";
+        return [`<peer_message ${attrs.map(([k, v]) => `${k}="${escapeAttr(v)}"`).join(" ")}>`, neutralize(m.body) + note, "</peer_message>"].join("\n");
+    });
     const first = messages[0];
-    const replyHint = first.channel
-        ? `peer_send with channel="${issueUrl(first.channel)}" and to="${senderAddress(first)}"`
-        : `peer_send with to="${senderAddress(first)}"`;
+    const replyHint = `peer_send with channel="${issueUrl(first.channel)}", to="${senderAddress(first)}", and reply_to="${first.url}"`;
     return [
-        ...(omitted > 0 ? [`(${omitted} older peer message(s) were skipped during catch-up; see the issue for history.)`] : []),
+        ...(omitted > 0 ? [`(${omitted} older peer message(s) were skipped during catch-up; see the channel issue for history.)`] : []),
         ...blocks,
         "",
         `${messages.length === 1 ? "This message was" : "These messages were"} delivered over the peer bus to you ("${me.login}/${me.session}") ` +

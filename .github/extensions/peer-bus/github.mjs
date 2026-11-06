@@ -33,10 +33,8 @@ function nextLink(header) {
 }
 
 export class GitHub {
-    constructor({ repo, tokenProvider = defaultTokenProvider(), apiUrl = "https://api.github.com", fetchImpl = globalThis.fetch }) {
-        const [owner, name, extra] = String(repo ?? "").split("/");
-        if (!owner || !name || extra !== undefined) throw new Error(`Invalid repository "${repo}". Use owner/name.`);
-        Object.assign(this, { owner, name, repo: `${owner}/${name}`, tokenProvider, apiUrl: apiUrl.replace(/\/+$/, ""), fetchImpl });
+    constructor({ tokenProvider = defaultTokenProvider(), apiUrl = "https://api.github.com", fetchImpl = globalThis.fetch } = {}) {
+        Object.assign(this, { tokenProvider, apiUrl: apiUrl.replace(/\/+$/, ""), fetchImpl });
         this.token = null;
         this.etags = new Map();
         this.viewer = null;
@@ -111,7 +109,10 @@ export class GitHub {
     // With partial: true, returns whatever data GitHub resolved even if some fields errored.
     async graphql(query, variables = {}, { partial = false } = {}) {
         const result = await this.request("POST", "/graphql", { query, variables });
-        if (result?.errors?.length && !(partial && result.data)) throw new GitHubError(`GitHub GraphQL failed: ${result.errors.map((e) => e.message).join("; ")}`, 200);
+        if (result?.errors?.length && !(partial && result.data)) {
+            const scopeError = result.errors.some((e) => e.type === "INSUFFICIENT_SCOPES");
+            throw new GitHubError(`GitHub GraphQL failed: ${result.errors.map((e) => e.message).join("; ")}`, scopeError ? 403 : 200);
+        }
         return result.data;
     }
 
@@ -120,45 +121,12 @@ export class GitHub {
         return this.viewer;
     }
 
-    repoPath(suffix = "") {
-        return `/repos/${this.owner}/${this.name}${suffix}`;
-    }
-
-    getRepo() {
-        return this.request("GET", this.repoPath());
-    }
-
-    async unwatchRepo() {
-        await this.request("DELETE", this.repoPath("/subscription"));
-    }
-
-    // GraphQL rather than REST: the REST issue list can lag several seconds behind issue creation,
-    // which let concurrent sessions create duplicate channels and inboxes.
-    async listOpenIssues() {
-        const issues = [];
-        let after = null;
-        do {
-            const data = await this.graphql(
-                `query($owner: String!, $name: String!, $after: String) { repository(owner: $owner, name: $name) {
-                    issues(first: 100, after: $after, states: OPEN, orderBy: { field: CREATED_AT, direction: ASC }) {
-                        pageInfo { hasNextPage endCursor } nodes { number title id url author { login } } } } }`,
-                { owner: this.owner, name: this.name, after }
-            );
-            const connection = data.repository.issues;
-            for (const node of connection.nodes) {
-                issues.push({ number: node.number, title: node.title, node_id: node.id, html_url: node.url, user: { login: node.author?.login } });
-            }
-            after = connection.pageInfo.hasNextPage ? connection.pageInfo.endCursor : null;
-        } while (after);
-        return issues;
-    }
-
     // Issue operations take a ref: { repo: "owner/name", number }.
     issuePath({ repo, number }, suffix = "") {
         return `/repos/${repo}/issues/${number}${suffix}`;
     }
 
-    createIssue(title, body, repo = this.repo) {
+    createIssue(title, body, repo) {
         return this.request("POST", `/repos/${repo}/issues`, { title, body });
     }
 
@@ -170,6 +138,7 @@ export class GitHub {
         await this.request("PATCH", this.issuePath(ref), { state: "closed", state_reason: "not_planned" });
     }
 
+    // REST `since` filters by updated time, so callers also filter by comment ID.
     listComments(ref, since) {
         const query = new URLSearchParams({ per_page: "100" });
         if (since) query.set("since", since);
@@ -187,19 +156,66 @@ export class GitHub {
         return this.request("POST", this.issuePath(ref, "/comments"), { body });
     }
 
-    updateComment(id, body) {
-        return this.request("PATCH", this.repoPath(`/issues/comments/${id}`), { body });
+    getComment(repo, id) {
+        return this.request("GET", `/repos/${repo}/issues/comments/${id}`);
     }
 
-    async deleteComment(id) {
-        await this.request("DELETE", this.repoPath(`/issues/comments/${id}`));
+    async deleteComment(repo, id) {
+        await this.request("DELETE", `/repos/${repo}/issues/comments/${id}`);
     }
 
-    async unsubscribeThread(nodeId) {
-        await this.graphql(
-            "mutation($id: ID!) { updateSubscription(input: { subscribableId: $id, state: UNSUBSCRIBED }) { clientMutationId } }",
-            { id: nodeId }
-        );
+    // Returns the reaction; GitHub returns the existing one if this user already reacted with `content`.
+    addReaction(repo, commentId, content) {
+        return this.request("POST", `/repos/${repo}/issues/comments/${commentId}/reactions`, { content });
+    }
+
+    async deleteReaction(repo, commentId, reactionId) {
+        await this.request("DELETE", `/repos/${repo}/issues/comments/${commentId}/reactions/${reactionId}`);
+    }
+
+    // Every comment on an issue with its ❤️ reactions, for finding status-heartbeat comments.
+    async commentsWithHearts({ repo, number }) {
+        const [owner, name] = repo.split("/");
+        const comments = [];
+        let after = null;
+        do {
+            const data = await this.graphql(
+                `query($owner: String!, $name: String!, $number: Int!, $after: String) { repository(owner: $owner, name: $name) {
+                    issue(number: $number) { comments(first: 100, after: $after) { pageInfo { hasNextPage endCursor }
+                        nodes { databaseId body url createdAt author { login }
+                            reactions(content: HEART, first: 50) { nodes { createdAt user { login } } } } } } } }`,
+                { owner, name, number: Number(number), after }
+            );
+            const connection = data?.repository?.issue?.comments;
+            if (!connection) break;
+            for (const node of connection.nodes) {
+                comments.push({
+                    id: node.databaseId,
+                    body: node.body,
+                    html_url: node.url,
+                    created_at: node.createdAt,
+                    user: { login: node.author?.login },
+                    hearts: node.reactions.nodes.map((r) => ({ login: r.user?.login, createdAt: r.createdAt })),
+                });
+            }
+            after = connection.pageInfo.hasNextPage ? connection.pageInfo.endCursor : null;
+        } while (after);
+        return comments;
+    }
+
+    // Stops GitHub notifying this user about an issue. Needs the `notifications` scope.
+    async muteIssue(nodeId) {
+        const mutate = (state) =>
+            this.graphql("mutation($id: ID!, $state: SubscriptionState!) { updateSubscription(input: { subscribableId: $id, state: $state }) { clientMutationId } }", {
+                id: nodeId,
+                state,
+            });
+        try {
+            await mutate("IGNORED");
+        } catch (error) {
+            if (error.status === 403) throw error;
+            await mutate("UNSUBSCRIBED");
+        }
     }
 
     async aliveSocketUrl() {

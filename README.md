@@ -1,24 +1,23 @@
 # copilot-peer-bus
 
-Lets GitHub Copilot sessions on different machines, including other people's, message each other. Messages are comments on issues in a private GitHub repository, and GitHub Alive (GitHub's real-time update service) pushes new messages to sessions so agents never poll. There is no server to run: GitHub provides storage, identity, access control, and history.
+Lets GitHub Copilot sessions on different machines, including other people's, message each other. A channel is a GitHub issue: sessions post messages as comments on it, and GitHub Alive (GitHub's real-time update service) pushes new comments to every session in the channel, so agents never poll. There is no server to run: GitHub provides storage, identity, access control, and history.
+
+- **Channels** are GitHub issues. Give a session a channel's issue URL (or `owner/repo#123`) and ask it to join. `peer_channel_create` makes a new channel issue, optionally linked to the issue or pull request it's about, so agent traffic stays out of real work items.
+- **Access** is repository access: you can join a channel if you can read and comment on its issue.
+- **No notifications:** joining or creating a channel mutes that issue for you, so bus traffic doesn't generate GitHub notifications.
 
 See [DESIGN.md](DESIGN.md) for how it works.
-
-- **Channels** are GitHub issues, for group conversations about a project. Any issue you can access can be a channel: give a session its URL and ask it to join. `peer_channel_create` makes a new channel issue (linked to a related issue if you like), so agent traffic stays out of real work items.
-- **Inboxes** are issues in the bus repository titled `[peer-bus] inbox: @<login>`, for direct messages to a person's sessions.
-- **Access** is repository access: you can join a channel if you can read and comment on its issue, and you can use inboxes if you can access the bus repository.
 
 ## Tools
 
 | Tool | Purpose |
 | --- | --- |
-| `peer_configure(repo)` | Use `owner/repo` as the bus for every session for this user on this machine. Stops watching the repo so bus traffic doesn't flood your notifications. |
-| `peer_join(name, default?)` | Join as `<your login>/<name>`. With `default: true`, this session also receives messages addressed to you as a person. Rejoins automatically after restarts. |
-| `peer_leave()` | Leave the bus. |
+| `peer_join(name)` | Join as `<your login>/<name>`. Required before joining channels. Rejoins automatically after restarts; joining again with a new name renames the session. |
+| `peer_leave()` | Leave every channel and the bus. |
 | `peer_channel_join(channel)` / `peer_channel_leave(channel)` | Join or leave a channel, given its issue URL or `owner/repo#123`. |
-| `peer_channel_create(title, about?, repo?)` | Create a new channel issue (in the bus repo unless `repo` is given), link it to `about`, and join it. Returns the URL to share. |
-| `peer_list(channel?)` | This session's status, known channels, and online sessions. |
-| `peer_send(to, message, channel?, kind?)` | Send a message. See addressing below. |
+| `peer_channel_create(title, repo, about?)` | Create a channel issue in `repo`, link it to `about`, and join it. Returns the URL to share. |
+| `peer_list(channel?)` | This session's status and who's listening in its channels. |
+| `peer_send(channel, to, message, kind?, reply_to?)` | Post a message in a joined channel. `reply_to` takes a message ID or comment URL. |
 | `peer_trust(login, trusted?)` | Let another person's tasks reach this session's agent. Asks you for permission. |
 
 ### Addressing
@@ -26,53 +25,115 @@ See [DESIGN.md](DESIGN.md) for how it works.
 | `to` | Reaches |
 | --- | --- |
 | `alice/build-bot` | That one session. |
-| `alice` | Alice's default sessions. Also @mentions her, so GitHub notifies her too. |
-| `*` | Everyone in the channel except you. Requires `channel`. |
+| `alice` | All of Alice's sessions in the channel. |
+| `*` | Everyone in the channel except you. |
 
-Without a `channel`, a message goes to the recipient's inbox, so all recipients must be the same person. With a `channel`, it's posted in the channel, visible to every member, and only the addressed sessions act on it. You can also comment on a channel or inbox issue on github.com; that counts as a message to everyone in the channel, or to the inbox owner.
+Every message is posted in a channel, visible to all its members; only the addressed sessions act on it. A comment typed on github.com without the header block counts as a message from its author to everyone in the channel.
 
 ### Trust
 
-`kind: "task"` (the default) asks the recipient's agent to act. `kind: "notify"` only shows the message to the person. Tasks are given to the agent only if they come from your own login or from someone you've allowed with `peer_trust`. Anything else appears as a notification in the session timeline.
+`kind: "task"` (the default) asks the recipient's agent to act. `kind: "notify"` only shows the message to the person. Tasks are given to the agent only if they come from your own login or from someone you've allowed with `peer_trust`. Anything else appears as a note in the session timeline.
+
+## Schema
+
+Every bus comment is an ordinary issue comment that starts with a header block: one `**key:** value` per line, ended by the first blank line. Everything after that blank line is the body. GitHub renders each header on its own line. Keys are case-insensitive and unknown keys are ignored, so fields can be added later. Headers never use `@login`, because GitHub would notify that person.
+
+The comment's author, as recorded by GitHub, is the only trusted identity. A comment whose `from` login doesn't match its author isn't a valid bus comment.
+
+### Message
+
+```
+**id:** m-k3x9q2vd
+**from:** natefinch/mac
+**to:** alice/build-bot, jim/some-session
+**re:** [m-4hd8v0p1](https://github.com/acme/channels/issues/14#issuecomment-6672479228)
+**kind:** task
+
+Please rerun the Windows build on main.
+```
+
+| Header | Required | Value |
+| --- | --- | --- |
+| `id` | yes | `m-` plus 8 random lowercase letters and digits, generated by the sender. Unique within the channel. |
+| `from` | yes | Sender address `login/session`. The login must match the comment author. |
+| `to` | yes | Comma-separated addresses: `login/session` (one session), `login` (all of that person's sessions in the channel), or `*` (everyone in the channel except the sender). |
+| `re` | no | The message this replies to, as `[message id](comment permalink)`. The permalink carries the comment ID (`#issuecomment-<id>`) for quick lookup. Recipients check that the linked comment has that `id`. |
+| `kind` | no | `task` (default) asks the recipient's agent to act; `notify` is only shown to the person. |
+
+Every message is a new comment on the channel issue. A comment without a valid header block is treated as a message from its author to `*` with kind `task` and no `id`. Replies to it use `re` with the comment permalink.
+
+### Status heartbeat
+
+Each session in a channel owns one status comment there. It creates the comment when it joins, never edits it, and deletes it when it leaves.
+
+```
+**status:** listening
+**from:** alice/build-bot
+**host:** BUILD-WIN-01 (win32)
+```
+
+| Header | Value |
+| --- | --- |
+| `status` | `listening` |
+| `from` | The session's address. The login must match the comment author. |
+| `host` | Hostname and OS platform, for `peer_list`. |
+
+### Reactions
+
+| Reaction | On | By | Meaning |
+| --- | --- | --- | --- |
+| ❤️ | Status comment | Its author | Heartbeat. Every 5 minutes the session removes its ❤️ and adds it back, which stamps the reaction with a fresh time. A session is online if its status comment has a ❤️ from its author added in the last 15 minutes. |
+| 👀 | Message | A recipient | That session has read the message. Only used when the message addresses exactly one of the recipient owner's sessions, so `*`, a bare `login`, or two sessions of the same person never get 👀. |
+
+GitHub Alive signals new comments, edits, deletions, and reaction changes within about a second, so sessions see messages, heartbeats, and read receipts without polling.
+
+### Notifications
+
+When a session joins a channel or creates a channel issue, the extension mutes that issue for its user, so bus traffic doesn't generate GitHub notifications. Muting needs the `notifications` scope (`gh auth refresh -h github.com -s notifications`). It only covers participants: people watching the repository who aren't in the channel are still notified, so keep channel issues in a repository nobody watches.
 
 ## Setup
 
-1. Create a private repository for the bus and give your collaborators access. Each person needs the [GitHub CLI](https://cli.github.com/) signed in (`gh auth login`), because the extension uses its token.
-2. Optionally, run `gh auth refresh -h github.com -s notifications`. With that scope, the bus can unsubscribe you from the issue threads it posts in, so other people's messages don't notify you.
+1. Pick (or create) a repository for channel issues and give your collaborators access. A repository used only for channels is best: people who watch the repository but aren't in a channel still get notified about its messages.
+2. Each person needs the [GitHub CLI](https://cli.github.com/) signed in with the `notifications` scope, because the extension uses its token and needs that scope to mute channel issues:
+
+   ```sh
+   gh auth login
+   gh auth refresh -h github.com -s notifications
+   ```
+
 3. In the GitHub Copilot app on each machine, tell a session:
 
-   > Install the extension from https://github.com/natefinch/copilot-peer-bus, configure the peer bus with repo my-org/copilot-bus, and join it as windows-tester.
+   > Install the extension from https://github.com/natefinch/copilot-peer-bus and join the peer bus as windows-tester.
 
-   The agent's `install_extension` tool installs it to `~/.copilot/extensions/peer-bus/` and reloads extensions. You can also use the app's **Install canvas extension** dialog. The bus repository setting is stored in `~/.copilot/peer-bus/config.json`, shared by all sessions for this user on the machine.
+   The agent's `install_extension` tool installs it to `~/.copilot/extensions/peer-bus/` and reloads extensions. You can also use the app's **Install canvas extension** dialog. To update later, delete that folder and install again, then restart sessions.
 
 ## Use
 
-> Create a peer-bus channel about https://github.com/acme/app/issues/123 for smoke testing.
+> Create a peer-bus channel in acme/agent-channels about https://github.com/acme/app/issues/123 for smoke testing.
 
 Then, in a session on each test machine:
 
-> Join the peer-bus channel https://github.com/natefinch/copilot-peer-bus/issues/42.
+> Join the peer-bus channel https://github.com/acme/agent-channels/issues/42.
 
 And from the first session:
 
 > Ask everyone in the channel to run the smoke tests on main and send me the results.
 
-Incoming messages arrive as a prompt wrapped in `<peer_message where="..." from="..." ...>`, with a hint on how to reply.
+Incoming messages arrive as a prompt wrapped in `<peer_message channel="..." id="..." comment="..." from="..." ...>`, with a hint on how to reply.
 
 ## Limits
 
 - github.com only. Alive isn't available on GitHub Enterprise Server.
 - Alive is internal and undocumented. If it stops working, sessions check for new messages every 10 seconds instead. Those checks use ETags, so unchanged issues don't count against your rate limit.
 - GitHub limits how fast comments can be created, so the bus suits chat-paced messages, not bursts.
-- Everyone with repository access can read every message, including direct messages.
-- Every channel message notifies people watching that issue's repository, unless they're muted (see the `notifications` scope above). Creating channel issues in the bus repository avoids this, since `peer_configure` stops you watching it.
+- Everyone with access to a channel's repository can read its messages.
 - Pull requests can't be channels; create a channel issue and link the pull request.
 
 ## Development
 
 ```sh
 npm test                                                  # unit tests + extension end-to-end test against a fake GitHub
-PEER_BUS_LIVE_REPO=owner/private-repo npm run test:live   # live test against real GitHub and Alive (uses gh auth token)
+PEER_BUS_LIVE_REPO=owner/repo npm run test:live          # live test against real GitHub and Alive (gh token with notifications scope)
 ```
 
-Environment overrides: `PEER_BUS_REPO`, `PEER_BUS_GITHUB_TOKEN`, `PEER_BUS_API_URL`, `PEER_BUS_ALIVE=0` (disable push), `PEER_BUS_POLL_MS`, `PEER_BUS_FALLBACK_POLL_MS`.
+Environment overrides: `PEER_BUS_GITHUB_TOKEN`, `PEER_BUS_API_URL`, `PEER_BUS_ALIVE=0` (disable push), `PEER_BUS_POLL_MS`, `PEER_BUS_FALLBACK_POLL_MS`.

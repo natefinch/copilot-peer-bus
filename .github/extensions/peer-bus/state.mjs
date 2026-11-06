@@ -1,4 +1,4 @@
-// Per-machine config and per-session state, stored under $COPILOT_HOME/peer-bus.
+// Per-session state, stored under $COPILOT_HOME/peer-bus/sessions.
 
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
@@ -23,15 +23,6 @@ function writeJson(file, value) {
     const temp = `${file}.${process.pid}.tmp`;
     writeFileSync(temp, `${JSON.stringify(value, null, 2)}\n`);
     renameSync(temp, file);
-}
-
-export function loadConfig(env = process.env) {
-    const file = readJson(path.join(peerBusDir(env), "config.json")) ?? {};
-    return { repo: env.PEER_BUS_REPO || (typeof file.repo === "string" ? file.repo : "") };
-}
-
-export function saveConfig({ repo }, env = process.env) {
-    writeJson(path.join(peerBusDir(env), "config.json"), { repo });
 }
 
 export function sessionHash(sessionId) {

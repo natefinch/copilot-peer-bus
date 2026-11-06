@@ -1,6 +1,6 @@
 // Live smoke test against real GitHub + Alive. Polling is disabled, so delivery must come from Alive pushes.
-// Usage: PEER_BUS_LIVE_REPO=owner/private-repo npm run test:live   (uses `gh auth token`)
-// Like peer_configure, it stops watching the repository so the test traffic doesn't notify you.
+// Usage: PEER_BUS_LIVE_REPO=owner/repo npm run test:live   (uses `gh auth token`; needs the notifications scope)
+// Creates a channel issue in that repository and closes it at the end.
 
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -9,16 +9,15 @@ import path from "node:path";
 
 import { PeerBus } from "../.github/extensions/peer-bus/bus.mjs";
 import { GitHub } from "../.github/extensions/peer-bus/github.mjs";
-import { SessionStore, sessionHash } from "../.github/extensions/peer-bus/state.mjs";
+import { SessionStore } from "../.github/extensions/peer-bus/state.mjs";
 
 const repo = process.env.PEER_BUS_LIVE_REPO;
 if (!repo) {
-    console.error("Set PEER_BUS_LIVE_REPO=owner/private-repo");
+    console.error("Set PEER_BUS_LIVE_REPO=owner/repo");
     process.exit(2);
 }
 const home = mkdtempSync(path.join(os.tmpdir(), "peer-bus-live-"));
 const run = Date.now().toString(36);
-let channelRef = null;
 
 function waitFor(predicate, timeoutMs = 20_000) {
     return new Promise((resolve, reject) => {
@@ -35,11 +34,10 @@ function waitFor(predicate, timeoutMs = 20_000) {
 
 function session(name) {
     const prompts = [];
-    const github = new GitHub({ repo });
+    const github = new GitHub();
     const bus = new PeerBus({
         github,
         store: new SessionStore(`live-${name}-${run}`, { COPILOT_HOME: home }),
-        sid: sessionHash(`live-${name}-${run}`),
         host: os.hostname(),
         platform: process.platform,
         deliver: (prompt) => prompts.push({ prompt, at: Date.now() }),
@@ -53,38 +51,44 @@ function session(name) {
 
 const a = session("a");
 const b = session("b");
+let channel = null;
 try {
-    await a.github.unwatchRepo();
     await a.bus.join({ name: a.name });
     await b.bus.join({ name: b.name });
+    channel = await a.bus.createChannel({ title: `peer-bus live test ${run}`, repo });
+    await b.bus.joinChannel(channel.html_url);
     await waitFor(() => a.bus.alive.live && b.bus.alive.live);
-    console.log("both sessions joined; Alive live");
+    console.log(`channel ${channel.html_url}; Alive live`);
 
     const login = a.bus.me.login;
     let sentAt = Date.now();
-    await a.bus.send({ to: `${login}/${b.name}`, message: "live direct message" });
-    const sendMs = Date.now() - sentAt;
+    const question = await a.bus.send({ channel: channel.html_url, to: `${login}/${b.name}`, message: "live message" });
     await waitFor(() => b.prompts.length === 1);
-    console.log(`direct: send call ${sendMs}ms, delivered ${b.prompts[0].at - sentAt}ms after send started`);
-    assert.match(b.prompts[0].prompt, /live direct message/);
+    console.log(`message: delivered ${b.prompts[0].at - sentAt}ms after send started`);
+    assert.match(b.prompts[0].prompt, new RegExp(`id="${question.id}"`));
 
-    const created = await a.bus.createChannel({ title: `peer-bus live test ${run}` });
-    channelRef = { repo: created.repo, number: created.number };
-    await b.bus.joinChannel(created.html_url);
-    await waitFor(() => a.bus.alive.live && b.bus.alive.live);
+    const commentId = Number(question.url.split("#issuecomment-")[1]);
+    let eyes = [];
+    for (let i = 0; i < 40 && eyes.length === 0; i++) {
+        eyes = (await a.github.request("GET", `/repos/${channel.repo}/issues/comments/${commentId}/reactions?content=eyes`)) ?? [];
+        if (eyes.length === 0) await new Promise((r) => setTimeout(r, 250));
+    }
+    assert.equal(eyes.length, 1, "recipient marked the message read with 👀");
+    console.log("read receipt: 👀 present");
+
     sentAt = Date.now();
-    await b.bus.send({ to: "*", channel: created.html_url, message: "live channel broadcast" });
+    await b.bus.send({ channel: channel.html_url, to: `${login}/${a.name}`, message: "live reply", replyTo: question.id });
     await waitFor(() => a.prompts.length === 1);
-    console.log(`channel (joined by URL): delivered ${a.prompts[0].at - sentAt}ms after send started`);
-    assert.match(a.prompts[0].prompt, /peer-bus live test/);
+    console.log(`reply: delivered ${a.prompts[0].at - sentAt}ms after send started`);
+    assert.match(a.prompts[0].prompt, new RegExp(`re="${question.id}"`));
 
-    const { sessions } = await a.bus.list({ channel: created.html_url });
-    assert.deepEqual(sessions.map((s) => s.session).sort(), [a.name, b.name].sort());
+    const [listed] = await a.bus.list({ channel: channel.html_url });
+    assert.deepEqual(listed.sessions.map((s) => s.address).sort(), [`${login}/${a.name}`, `${login}/${b.name}`].sort());
     console.log("PASS");
 } finally {
     await a.bus.leave().catch(() => {});
     await b.bus.leave().catch(() => {});
-    if (channelRef) await a.github.closeIssue(channelRef).catch(() => {});
+    if (channel) await a.github.closeIssue(channel).catch(() => {});
     a.bus.stop();
     b.bus.stop();
     rmSync(home, { recursive: true, force: true });
