@@ -11,21 +11,30 @@ export class GitHubError extends Error {
     }
 }
 
-export function ghCliToken() {
-    return new Promise((resolve, reject) => {
-        execFile("gh", ["auth", "token", "--hostname", "github.com"], { timeout: 10_000 }, (error, stdout) => {
-            const token = stdout?.trim();
-            if (error || !token) {
-                reject(new Error("Could not get a GitHub token from the GitHub CLI. Install gh and run `gh auth login`."));
-            } else {
-                resolve(token);
-            }
+const ENV_TOKENS = ["GH_TOKEN", "GITHUB_TOKEN"];
+
+// Resolves to the token `gh auth token` prints with the given environment, or null if it has none.
+function ghAuthToken(env) {
+    return new Promise((resolve) => {
+        execFile("gh", ["auth", "token", "--hostname", "github.com"], { env, timeout: 10_000 }, (error, stdout) => {
+            resolve((!error && stdout?.trim()) || null);
         });
     });
 }
 
+// gh prefers GH_TOKEN/GITHUB_TOKEN over its stored login, and the GitHub Copilot app sets GH_TOKEN for
+// sessions to a token that lacks the notifications scope. So read the stored login, which is the one
+// `gh auth refresh -s notifications` updates, and fall back to the environment token only without one.
+export async function ghCliToken({ env = process.env, run = ghAuthToken } = {}) {
+    const storedEnv = { ...env };
+    for (const name of ENV_TOKENS) delete storedEnv[name];
+    const token = (await run(storedEnv)) ?? (ENV_TOKENS.some((name) => env[name]) ? await run(env) : null);
+    if (!token) throw new Error("Could not get a GitHub token from the GitHub CLI. Install gh and run `gh auth login`.");
+    return token;
+}
+
 export function defaultTokenProvider(env = process.env) {
-    return env.PEER_BUS_GITHUB_TOKEN ? async () => env.PEER_BUS_GITHUB_TOKEN : ghCliToken;
+    return env.PEER_BUS_GITHUB_TOKEN ? async () => env.PEER_BUS_GITHUB_TOKEN : () => ghCliToken({ env });
 }
 
 const MINUTE = 60_000;

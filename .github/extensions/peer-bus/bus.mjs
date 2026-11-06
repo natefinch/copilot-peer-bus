@@ -36,7 +36,8 @@ const RECEIPT_TTL_MS = 24 * 60 * 60_000;
 const ABOUT = /^(https:\/\/github\.com\/\S+|[A-Za-z0-9-]+\/[A-Za-z0-9._-]+#\d+)$/;
 export const MUTE_HELP =
     "The peer bus mutes each channel issue so bus messages don't send GitHub notifications, which needs the GitHub CLI's " +
-    "notifications scope. Run `gh auth refresh -h github.com -s notifications`, then try again.";
+    "notifications scope. Run `gh auth refresh -h github.com -s notifications` in a terminal where GH_TOKEN and " +
+    "GITHUB_TOKEN aren't set (gh won't refresh while they are), then try again.";
 
 const truncate = (text, max) => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
 const repoFromUrl = (url) => /^https:\/\/[^/]+\/([^/]+\/[^/]+)\/issues\/\d+/.exec(url ?? "")?.[1];

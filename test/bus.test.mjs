@@ -5,7 +5,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, test } from "node:test";
 
 import { MUTE_HELP, PeerBus } from "../.github/extensions/peer-bus/bus.mjs";
-import { GitHub, rateLimitDelay } from "../.github/extensions/peer-bus/github.mjs";
+import { GitHub, ghCliToken, rateLimitDelay } from "../.github/extensions/peer-bus/github.mjs";
 import { parseComment } from "../.github/extensions/peer-bus/protocol.mjs";
 import { SessionStore } from "../.github/extensions/peer-bus/state.mjs";
 import { FakeAlive, createFakeGitHub } from "./fixtures/fake-github.mjs";
@@ -467,5 +467,29 @@ describe("rate limits", () => {
         fake.failNext(1, { status: 403, message: "Resource not accessible by integration" });
         await assert.rejects(github.getIssue({ repo: "acme/channels", number: channel.number }), (e) => e.status === 403 && !/try again/.test(e.message));
         assert.deepEqual(sleeps, []);
+    });
+});
+
+describe("ghCliToken", () => {
+    // Fake `gh auth token`: the environment token if one is set, else the stored login (if any).
+    function fakeGh(stored) {
+        const calls = [];
+        const run = async (env) => {
+            calls.push(env);
+            return env.GH_TOKEN ?? env.GITHUB_TOKEN ?? stored;
+        };
+        return { run, calls };
+    }
+
+    test("prefers gh's stored login over GH_TOKEN and GITHUB_TOKEN", async () => {
+        const { run, calls } = fakeGh("tok-stored");
+        assert.equal(await ghCliToken({ env: { GH_TOKEN: "tok-app", GITHUB_TOKEN: "tok-ci", PATH: "/bin" }, run }), "tok-stored");
+        assert.deepEqual(calls, [{ PATH: "/bin" }]);
+    });
+
+    test("falls back to the environment token when gh has no stored login", async () => {
+        const { run } = fakeGh(null);
+        assert.equal(await ghCliToken({ env: { GH_TOKEN: "tok-app" }, run }), "tok-app");
+        await assert.rejects(ghCliToken({ env: {}, run }), /gh auth login/);
     });
 });

@@ -126,5 +126,6 @@ still notified, so channel issues belong in a repository dedicated to channels.
 - GitHub's secondary rate limits on content creation make this suitable for chat-paced messages,
   not bursts.
 - github.com only (Alive is not available on GitHub Enterprise Server).
-- Requires the GitHub CLI (`gh`) to be signed in on each machine; the extension reads its token
-  with `gh auth token`.
+- Requires the GitHub CLI (`gh`) to be signed in on each machine; the extension reads its stored
+  login with `gh auth token`, ignoring `GH_TOKEN` and `GITHUB_TOKEN` (which the GitHub Copilot app
+  sets to a token that can't get the `notifications` scope) unless gh has no stored login.

@@ -109,6 +109,8 @@ When a session joins a channel or creates a channel issue, the extension mutes t
    gh auth refresh -h github.com -s notifications
    ```
 
+   The extension uses gh's stored login even when `GH_TOKEN` or `GITHUB_TOKEN` is set (the GitHub Copilot app sets `GH_TOKEN` for sessions, and that token can't get the `notifications` scope). It falls back to those variables only when gh has no stored login. gh refuses to refresh while either variable is set, so run the commands above in a terminal without them.
+
 3. In the GitHub Copilot app on each machine, tell a session:
 
    > Install the extension from https://github.com/natefinch/copilot-peer-bus and join the peer bus as windows-tester.
