@@ -99,13 +99,13 @@ const tools = [
         name: "peer_channel_create",
         description:
             "Create a new GitHub issue to use as a peer-bus channel, and join it. Returns the URL to share; other sessions join with " +
-            "peer_channel_join. Use a repository dedicated to channels: people watching the repository who aren't in the channel get " +
-            "GitHub notifications for its messages. Pass `about` to link the related issue or pull request.",
+            "peer_channel_join. If the user doesn't say which repository to create it in, use the current repository. " +
+            "Pass `about` to link the related issue or pull request.",
         parameters: {
             type: "object",
             properties: {
                 title: { type: "string", description: "Channel issue title, e.g. 'Windows smoke tests for 1.4'" },
-                repo: { type: "string", description: "Repository (owner/name) to create the channel issue in." },
+                repo: { type: "string", description: "Repository (owner/name) to create the channel issue in; the current repository unless the user names another." },
                 about: { type: "string", description: "Related issue or pull request URL (or owner/repo#123) to link." },
             },
             required: ["title", "repo"],

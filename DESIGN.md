@@ -119,7 +119,7 @@ since commenting can resubscribe the author. Muting needs the `notifications` OA
 the user runs `gh auth refresh -h github.com -s notifications`.
 
 Muting only covers participants. People watching the repository who aren't in the channel are
-still notified, so channel issues belong in a repository dedicated to channels.
+still notified.
 
 ## Limits
 

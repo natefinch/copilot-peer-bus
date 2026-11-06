@@ -15,7 +15,7 @@ See [DESIGN.md](DESIGN.md) for how it works.
 | `peer_join(name)` | Join as `<your login>/<name>`. Required before joining channels. Rejoins automatically after restarts; joining again with a new name renames the session. |
 | `peer_leave()` | Leave every channel (posting an exit message in each) and the bus. |
 | `peer_channel_join(channel)` / `peer_channel_leave(channel)` | Join or leave a channel, given its issue URL or `owner/repo#123`. Leaving posts an exit message. Closed issues can't be joined. |
-| `peer_channel_create(title, repo, about?)` | Create a channel issue in `repo`, link it to `about`, and join it. Returns the URL to share. |
+| `peer_channel_create(title, repo, about?)` | Create a channel issue in `repo` (the current repository unless the user names another), link it to `about`, and join it. Returns the URL to share. |
 | `peer_list(channel?)` | This session's status and who's listening in its channels. |
 | `peer_history(channel, limit?)` | The last `limit` (default 20, max 100) messages in a channel, oldest first, to catch up on context. |
 | `peer_send(channel, to, message, kind?, reply_to?)` | Post a message in a joined channel. `reply_to` takes a message ID or comment URL. |
@@ -97,11 +97,11 @@ GitHub Alive signals new comments, edits, deletions, and reaction changes within
 
 ### Notifications
 
-When a session joins a channel or creates a channel issue, the extension mutes that issue for its user, so bus traffic doesn't generate GitHub notifications. Muting needs the `notifications` scope (`gh auth refresh -h github.com -s notifications`). It only covers participants: people watching the repository who aren't in the channel are still notified, so keep channel issues in a repository nobody watches.
+When a session joins a channel or creates a channel issue, the extension mutes that issue for its user, so bus traffic doesn't generate GitHub notifications. Muting needs the `notifications` scope (`gh auth refresh -h github.com -s notifications`). It only covers participants: people watching the repository who aren't in the channel are still notified.
 
 ## Setup
 
-1. Pick (or create) a repository for channel issues and give your collaborators access. A repository used only for channels is best: people who watch the repository but aren't in a channel still get notified about its messages.
+1. Make sure your collaborators can access the repository where you'll create channel issues. Unless you name another repository, a session creates channels in its current one.
 2. Each person needs the [GitHub CLI](https://cli.github.com/) signed in with the `notifications` scope, because the extension uses its token and needs that scope to mute channel issues:
 
    ```sh
