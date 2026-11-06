@@ -34,6 +34,21 @@ const bus = new PeerBus({
 
 const CHANNEL_DESCRIPTION = "Channel issue URL (https://github.com/owner/repo/issues/123) or owner/repo#123.";
 
+// The app replaces a thrown error's message with "Tool execution failed", hiding instructions such as how
+// to add the notifications scope. Returning the failure as a result lets the agent read and relay it.
+function reportFailures(tool) {
+    return {
+        ...tool,
+        handler: async (...args) => {
+            try {
+                return await tool.handler(...args);
+            } catch (error) {
+                return { textResultForLlm: `Error: ${error.message}`, resultType: "failure", error: error.message };
+            }
+        },
+    };
+}
+
 const tools = [
     {
         name: "peer_join",
@@ -190,7 +205,7 @@ const tools = [
     },
 ];
 
-session = await joinSession({ tools });
+session = await joinSession({ tools: tools.map(reportFailures) });
 
 try {
     await bus.start();

@@ -183,7 +183,7 @@ export class PeerBus {
         if (!text) throw new Error("A channel needs a title.");
         const related = about ? String(about).trim() : "";
         if (related && !ABOUT.test(related)) throw new Error(`"${about}" isn't an issue or pull request reference. Use a github.com URL or owner/repo#123.`);
-        this.requireMuteScope();
+        await this.requireMuteScope();
         let created;
         try {
             created = await this.github.createIssue(text, channelBody(related), repo);
@@ -221,7 +221,7 @@ export class PeerBus {
     }
 
     async postExit(entry) {
-        if (this.github.scopes && !this.github.scopes.has("notifications")) {
+        if (!this.hasMuteScope()) {
             this.log(`not posting an exit message in ${describeChannel(entry)}: it can't be muted without the notifications scope`, "warning");
             return;
         }
@@ -267,7 +267,7 @@ export class PeerBus {
         }
         const source = this.sources.get(issueKey(parseChannel(channel)));
         if (!source) throw new Error("This session isn't in that channel. Join it with peer_channel_join first.");
-        this.requireMuteScope();
+        await this.requireMuteScope();
         const re = replyTo ? await this.resolveReply(source, replyTo) : null;
         const id = newMessageId();
         const text = encodeMessage({ id, from: this.address, to: addresses, re, kind, body });
@@ -433,13 +433,20 @@ export class PeerBus {
 
     // --- notifications ---------------------------------------------------------------------
 
-    requireMuteScope() {
-        if (this.github.scopes && !this.github.scopes.has("notifications")) throw new Error(MUTE_HELP);
+    hasMuteScope() {
+        return !this.github.scopes || this.github.scopes.has("notifications");
+    }
+
+    async requireMuteScope() {
+        if (this.hasMuteScope()) return;
+        // The person may have run `gh auth refresh -s notifications` since the token was read.
+        await this.github.reauthenticate();
+        if (!this.hasMuteScope()) throw new Error(MUTE_HELP);
     }
 
     // Stops GitHub notifying this user about the issue. With required, failure aborts the operation.
     async mute(nodeId, { required = false } = {}) {
-        if (required) this.requireMuteScope();
+        if (required) await this.requireMuteScope();
         if (!nodeId) return;
         try {
             await this.github.muteIssue(nodeId);
@@ -525,7 +532,7 @@ export class PeerBus {
         this.stopped = false;
         const login = await this.github.login();
         this.me = { login, session: this.state.name };
-        if (this.github.scopes && !this.github.scopes.has("notifications")) this.log(MUTE_HELP, "warning");
+        if (!this.hasMuteScope()) this.log(MUTE_HELP, "warning");
         this.sources.clear();
         for (const entry of [...this.state.channels]) {
             try {

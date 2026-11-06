@@ -80,6 +80,13 @@ export class GitHub {
         return `Bearer ${this.token}`;
     }
 
+    // Rereads the token, whose scopes may have changed since it was read, and learns its scopes.
+    async reauthenticate() {
+        this.token = await this.tokenProvider();
+        this.scopes = null;
+        await this.raw("GET", "/user");
+    }
+
     // Returns { status, data, link }. Waits out rate limits (up to maxRateLimitWaitMs in total), then throws
     // GitHubError for non-2xx/304 responses.
     async raw(method, pathOrUrl, options = {}) {

@@ -78,6 +78,12 @@ async function launchExtension(sessionId, login) {
     return { child, call, prompts, events };
 }
 
+// Tools return failures as results, since the app hides a thrown error's message.
+function failure(result) {
+    assert.equal(result?.resultType, "failure", `expected a failure, got ${JSON.stringify(result)}`);
+    return result.textResultForLlm;
+}
+
 test("extension: join, create a channel, message by URL, reply, and rejoin after restart", async () => {
     const mac = await launchExtension("session-mac", "natefinch");
     const win = await launchExtension("session-win", "natefinch");
@@ -93,13 +99,13 @@ test("extension: join, create a channel, message by URL, reply, and rejoin after
         "peer_trust",
     ]);
 
-    await assert.rejects(mac.call("peer_channel_join", { channel: "acme/channels#1" }), /Call peer_join/);
+    assert.match(failure(await mac.call("peer_channel_join", { channel: "acme/channels#1" })), /^Error: .*Call peer_join/);
     assert.match(await mac.call("peer_join", { name: "mac" }), /Joined the peer bus as natefinch\/mac/);
     await win.call("peer_join", { name: "win" });
 
     const created = await mac.call("peer_channel_create", { title: "Windows smoke tests", repo: "acme/channels", about: "acme/channels#99" });
     const url = /Share this URL so other sessions can join: (\S+)$/.exec(created)[1];
-    await assert.rejects(win.call("peer_channel_join", { channel: "release" }), /Invalid channel/);
+    assert.match(failure(await win.call("peer_channel_join", { channel: "release" })), /Invalid channel/);
     assert.match(await win.call("peer_channel_join", { channel: url }), /^Joined "Windows smoke tests" \(https:\/\/github\.com\/acme\/channels\/issues\/1\)\.$/);
 
     const list = await mac.call("peer_list");

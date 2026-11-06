@@ -9,7 +9,13 @@ const iso = (ms = Date.now()) => new Date(Math.floor(ms / 1000) * 1000).toISOStr
 
 // repos: { "acme/app": { members: ["natefinch"] } } (members omitted = everyone has access).
 // scopes: the X-OAuth-Scopes header value; null omits the header (like a fine-grained token).
-export function createFakeGitHub({ repos = { "acme/channels": {} }, users = ["natefinch", "alice", "bob"], scopes = "repo, notifications" } = {}) {
+// tokenScopes: { token: scopes } overrides scopes per token. A token may end in ":suffix" (tok-alice:new is alice's).
+export function createFakeGitHub({
+    repos = { "acme/channels": {} },
+    users = ["natefinch", "alice", "bob"],
+    scopes = "repo, notifications",
+    tokenScopes = {},
+} = {}) {
     const issues = [];
     const comments = [];
     const reactions = [];
@@ -20,7 +26,7 @@ export function createFakeGitHub({ repos = { "acme/channels": {} }, users = ["na
     let nextComment = 1000;
     let nextReaction = 1;
     let baseUrl = "";
-    const hasNotifications = scopes === null || scopes.split(",").map((s) => s.trim()).includes("notifications");
+    const hasNotifications = (value) => value === null || value.split(",").map((s) => s.trim()).includes("notifications");
 
     const repoInfo = (fullName) => {
         const match = Object.keys(repos).find((r) => r.toLowerCase() === String(fullName).toLowerCase());
@@ -71,8 +77,10 @@ export function createFakeGitHub({ repos = { "acme/channels": {} }, users = ["na
         return commentJson(comment);
     }
 
+    // res.oauthScopes: the scopes of the request's token.
     function send(res, status, value, headers = {}) {
-        res.writeHead(status, { "Content-Type": "application/json", ...(scopes === null ? {} : { "X-OAuth-Scopes": scopes }), ...headers });
+        const oauthScopes = res.oauthScopes === undefined ? scopes : res.oauthScopes;
+        res.writeHead(status, { "Content-Type": "application/json", ...(oauthScopes === null ? {} : { "X-OAuth-Scopes": oauthScopes }), ...headers });
         res.end(value === undefined ? "" : JSON.stringify(value));
     }
 
@@ -105,7 +113,7 @@ export function createFakeGitHub({ repos = { "acme/channels": {} }, users = ["na
     async function graphql(req, res, login) {
         const { query, variables } = await readJson(req);
         if (query.includes("updateSubscription")) {
-            if (!hasNotifications) {
+            if (!hasNotifications(res.oauthScopes)) {
                 return send(res, 200, { errors: [{ type: "INSUFFICIENT_SCOPES", message: "requires one of the following scopes: ['notifications']" }] });
             }
             mutes.push({ login, id: variables.id, state: variables.state });
@@ -153,13 +161,14 @@ export function createFakeGitHub({ repos = { "acme/channels": {} }, users = ["na
     const server = http.createServer(async (req, res) => {
         stats.requests++;
         const url = new URL(req.url, baseUrl);
+        const token = (req.headers.authorization ?? "").replace(/^Bearer /, "");
+        res.oauthScopes = Object.hasOwn(tokenScopes, token) ? tokenScopes[token] : scopes;
         const failure = failures.find((f) => f.count > 0 && (!f.method || f.method === req.method));
         if (failure) {
             failure.count--;
             return send(res, failure.status, { message: failure.message }, failure.headers);
         }
-        const token = (req.headers.authorization ?? "").replace(/^Bearer /, "");
-        const login = users.find((u) => token === `tok-${u}`);
+        const login = users.find((u) => token.replace(/:.*$/, "") === `tok-${u}`);
         if (!login) return send(res, 401, { message: "Bad credentials" });
         const path = url.pathname;
         let match;
