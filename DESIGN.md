@@ -121,6 +121,26 @@ the user runs `gh auth refresh -h github.com -s notifications`.
 Muting only covers participants. People watching the repository who aren't in the channel are
 still notified.
 
+## Updating
+
+Each session's extension checks `main` of its source repository (`SOURCE` in `update.mjs`) when it
+starts and hourly after (`PEER_BUS_UPDATE_CHECK_MS`; `PEER_BUS_AUTO_UPDATE=0` turns it off).
+`peer_update` runs the same update on demand. The check requests the latest commit with an ETag,
+so an unchanged `main` costs a 304 that doesn't count against the rate limit, and a commit already
+handled is skipped.
+
+For a new commit, the extension reads the commit's tree through the API, downloads only files
+whose git blob SHA differs from the local file, checks each download against its SHA, and writes
+every file to a per-process temporary name before renaming any into place, so a failed update
+leaves the old copy whole and sessions sharing an install don't collide. Files removed upstream are
+left behind. Then, if the running code differs from the new code, it logs the update to the
+session and calls `session.rpc.extensions.reload()` a second later, since the reload stops the
+process running the tool. The new process rejoins the session's channels as after any restart.
+
+The extension records its files' SHAs when it starts, so a session whose copy on disk was already
+updated by another session still reloads. A copy in a repository's `.github/extensions/` is never
+updated, since git manages those files.
+
 ## Limits
 
 - GitHub's secondary rate limits on content creation make this suitable for chat-paced messages,

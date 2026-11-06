@@ -1,5 +1,9 @@
 // Copilot session extension: lets sessions on different machines and of different people message each other
-// through GitHub issues used as channels, with GitHub Alive pushing new messages. See README.md.
+// through GitHub issues used as channels, with GitHub Alive pushing new messages.
+// Source: https://github.com/natefinch/copilot-peer-bus (see README.md there).
+
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { joinSession } from "@github/copilot-sdk/extension";
 
@@ -8,6 +12,7 @@ import { PeerBus } from "./bus.mjs";
 import { GitHub } from "./github.mjs";
 import { SESSION_NAME } from "./protocol.mjs";
 import { SessionStore } from "./state.mjs";
+import { SOURCE_URL, Updater, fileShas, isProjectCopy } from "./update.mjs";
 
 const env = process.env;
 const positive = (value, fallback) => (Number(value) > 0 ? Number(value) : fallback);
@@ -18,11 +23,27 @@ function log(text, level = "info") {
     session?.log(`peer-bus: ${text}`, { level, ephemeral: level === "info" }).catch(() => {});
 }
 
+const extensionDir = path.dirname(fileURLToPath(import.meta.url));
+
+const github = new GitHub({
+    apiUrl: env.PEER_BUS_API_URL || undefined,
+    onRateLimit: (ms) => log(`GitHub rate limit reached; retrying in ${Math.ceil(ms / 1000)}s`, "warning"),
+});
+
+const updater = new Updater({
+    github,
+    dir: extensionDir,
+    // What this process runs, to tell whether files installed since (by any session) need a reload.
+    loaded: await fileShas(extensionDir),
+    // Reloading stops this process, so let a tool's result reach the agent first.
+    reload: ({ commit, summary }) => {
+        session.log(`peer-bus: updated to ${commit.slice(0, 7)} (${summary}); reloading extensions.`, { level: "info" }).catch(() => {});
+        setTimeout(() => session.rpc.extensions.reload().catch((e) => log(`could not reload extensions: ${e.message}`, "error")), 1000);
+    },
+});
+
 const bus = new PeerBus({
-    github: new GitHub({
-        apiUrl: env.PEER_BUS_API_URL || undefined,
-        onRateLimit: (ms) => log(`GitHub rate limit reached; retrying in ${Math.ceil(ms / 1000)}s`, "warning"),
-    }),
+    github,
     store: new SessionStore(env.SESSION_ID ?? "unknown-session"),
     deliver: (prompt) => session.send({ prompt }).catch((e) => log(`could not deliver a message: ${e.message}`, "error")),
     notify: (text) => session.log(text, { level: "info" }).catch(() => {}),
@@ -203,6 +224,21 @@ const tools = [
             return `${trusted ? "Trusting" : "No longer trusting"} ${login}. Trusted in this session: ${list.join(", ") || "only yourself"}.`;
         },
     },
+    {
+        name: "peer_update",
+        description:
+            `Update the peer-bus extension: download the latest code from its source repository (${SOURCE_URL}), install it over ` +
+            "this copy, and reload this session's extensions to run it. The session rejoins its channels automatically. Sessions " +
+            "also check for updates hourly and install them on their own. Asks the user for permission.",
+        parameters: { type: "object", properties: {} },
+        handler: async () => {
+            const { commit, summary, written, stale } = await updater.update();
+            const version = `${commit.slice(0, 7)} (${summary})`;
+            if (!stale) return `peer-bus is up to date: ${version}.`;
+            const installed = written.length ? `Installed ${version} from ${SOURCE_URL} (${written.join(", ")})` : `${version} was already installed`;
+            return `${installed}. Reloading extensions now to run it.`;
+        },
+    },
 ];
 
 session = await joinSession({ tools: tools.map(reportFailures) });
@@ -211,5 +247,9 @@ try {
     await bus.start();
 } catch (error) {
     log(`could not start: ${error.message}`, "warning");
+}
+
+if (env.PEER_BUS_AUTO_UPDATE !== "0" && !isProjectCopy(extensionDir)) {
+    updater.start(positive(env.PEER_BUS_UPDATE_CHECK_MS, 60 * 60_000), (error) => log(`could not check for updates: ${error.message}`));
 }
 

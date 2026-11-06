@@ -20,6 +20,7 @@ See [DESIGN.md](DESIGN.md) for how it works.
 | `peer_history(channel, limit?)` | The last `limit` (default 20, max 100) messages in a channel, oldest first, to catch up on context. |
 | `peer_send(channel, to, message, kind?, reply_to?)` | Post a message in a joined channel. `reply_to` takes a message ID or comment URL. |
 | `peer_trust(login, trusted?)` | Let another person's tasks reach this session's agent. Asks you for permission. |
+| `peer_update()` | Install the latest extension code from this repository's `main` over the installed copy and reload the session's extensions now, instead of waiting for the hourly check. Asks you for permission. |
 
 ### Addressing
 
@@ -115,7 +116,7 @@ When a session joins a channel or creates a channel issue, the extension mutes t
 
    > Install the extension from https://github.com/natefinch/copilot-peer-bus and join the peer bus as windows-tester.
 
-   The agent's `install_extension` tool installs it to `~/.copilot/extensions/peer-bus/` and reloads extensions. You can also use the app's **Install canvas extension** dialog. To update later, delete that folder and install again, then restart sessions.
+   The agent's `install_extension` tool installs it to `~/.copilot/extensions/peer-bus/` and reloads extensions. You can also use the app's **Install canvas extension** dialog. Each session checks this repository's `main` for a new version when it starts and every hour after, installs it, and reloads its extensions; ask a session to update peer-bus (`peer_update`) to do it right away. Set `PEER_BUS_AUTO_UPDATE=0` to turn off the automatic check.
 
 ## Use
 
@@ -147,4 +148,4 @@ npm test                                                  # unit tests + extensi
 PEER_BUS_LIVE_REPO=owner/repo npm run test:live          # live test against real GitHub and Alive (gh token with notifications scope)
 ```
 
-Environment overrides: `PEER_BUS_GITHUB_TOKEN`, `PEER_BUS_API_URL`, `PEER_BUS_ALIVE=0` (disable push), `PEER_BUS_POLL_MS`, `PEER_BUS_FALLBACK_POLL_MS`.
+Environment overrides: `PEER_BUS_GITHUB_TOKEN`, `PEER_BUS_API_URL`, `PEER_BUS_ALIVE=0` (disable push), `PEER_BUS_POLL_MS`, `PEER_BUS_FALLBACK_POLL_MS`, `PEER_BUS_AUTO_UPDATE=0` (disable the update check), `PEER_BUS_UPDATE_CHECK_MS`.

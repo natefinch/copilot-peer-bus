@@ -97,7 +97,9 @@ test("extension: join, create a channel, message by URL, reply, and rejoin after
         "peer_history",
         "peer_send",
         "peer_trust",
+        "peer_update",
     ]);
+    assert.match(failure(await mac.call("peer_update")), /is a project extension in .*; update it with git instead/);
 
     assert.match(failure(await mac.call("peer_channel_join", { channel: "acme/channels#1" })), /^Error: .*Call peer_join/);
     assert.match(await mac.call("peer_join", { name: "mac" }), /Joined the peer bus as natefinch\/mac/);
