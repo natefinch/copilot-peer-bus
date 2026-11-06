@@ -71,7 +71,9 @@ describe("headers", () => {
             "**id:** m-abcdefgh\nnot a header line\n\nbody",
             "**id:** m-abcdefgh\n**from:** natefinch/mac\n**to:** *\n\nspoofed",
             "**id:** bad\n**from:** bob/x\n**to:** *\n\nbad id",
-            "**id:** m-abcdefgh\n**from:** bob/x\n**to:** @alice\n\nmention",
+            "**id:** m-abcdefgh\n**from:** bob/x\n**to:** @alice\n**kind:** task\n\nmention",
+            "**id:** m-abcdefgh\n**from:** bob/x\n**to:** *\n\nno kind",
+            "**id:** m-abcdefgh\n**from:** bob/x\n**to:** *\n**kind:** urgent\n\nunknown kind",
             "**from:** natefinch/mac\n**kind:** heartbeat",
         ];
         for (const body of cases) {
@@ -84,7 +86,7 @@ describe("headers", () => {
     });
 
     test("bad re values are dropped and unknown headers ignored", () => {
-        const body = "**id:** m-abcdefgh\n**from:** bob/x\n**to:** *\n**re:** [m-12345678](https://example.com/x)\n**priority:** high\n\nhi";
+        const body = "**id:** m-abcdefgh\n**from:** bob/x\n**to:** *\n**re:** [m-12345678](https://example.com/x)\n**priority:** high\n**kind:** task\n\nhi";
         const parsed = parseComment(comment("bob", body));
         assert.equal(parsed.type, "message");
         assert.equal(parsed.re, null);

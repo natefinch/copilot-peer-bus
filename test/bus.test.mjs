@@ -226,7 +226,7 @@ describe("messages", () => {
         await assert.rejects(win.bus.send({ channel: channel.html_url, to: "*", message: "x", replyTo: "nope" }), /reply_to must be/);
 
         // A forged re (wrong id for the linked comment) is dropped with a note.
-        const forged = `**id:** m-forged01\n**from:** natefinch/win\n**to:** natefinch/mac\n**re:** [m-99999999](${question.url})\n\nforged`;
+        const forged = `**id:** m-forged01\n**from:** natefinch/win\n**to:** natefinch/mac\n**re:** [m-99999999](${question.url})\n**kind:** task\n\nforged`;
         fake.addComment("natefinch", channel.number, forged, "acme/channels");
         await waitFor(() => mac.prompts.length === 3);
         assert.doesNotMatch(mac.prompts[2], /re="m-99999999"/);

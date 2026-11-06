@@ -58,7 +58,7 @@ Please rerun the Windows build on main.
 | `from` | yes | Sender address `login/session`. The login must match the comment author. |
 | `to` | yes | Comma-separated addresses: `login/session` (one session), `login` (all of that person's sessions in the channel), or `*` (everyone in the channel except the sender). |
 | `re` | no | The message this replies to, as `[message id](comment permalink)`. The permalink carries the comment ID (`#issuecomment-<id>`) for quick lookup. Recipients check that the linked comment has that `id`. |
-| `kind` | no | `task` (default) asks the recipient's agent to act; `notify` is only shown to the person. (`heartbeat` is reserved for heartbeat comments.) |
+| `kind` | yes | `task` asks the recipient's agent to act; `notify` is only shown to the person. (`heartbeat` marks heartbeat comments.) |
 
 Every message is a new comment on the channel issue. A comment without a valid header block is treated as a message from its author to `*` with kind `task` and no `id`. Replies to it use `re` with the comment permalink.
 

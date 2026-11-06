@@ -18,6 +18,7 @@ export const COMMENT_URL = /^https:\/\/github\.com\/([A-Za-z0-9-]+\/[A-Za-z0-9._
 export const MESSAGE_ID = /^m-[a-z0-9]{8}$/;
 const HEADER_LINE = /^\*\*([A-Za-z][A-Za-z0-9_-]*):\*\*[ \t]*(.*?)[ \t]*$/;
 const RE_VALUE = /^\[([^\]]*)\]\((https:\/\/[^)\s]+)\)$/;
+const MESSAGE_KINDS = new Set(["task", "notify"]);
 const ID_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789";
 
 export const sameLogin = (a, b) => typeof a === "string" && typeof b === "string" && a.toLowerCase() === b.toLowerCase();
@@ -105,7 +106,7 @@ function headerBlock(pairs) {
 }
 
 // re: { id: message id or null, url: comment permalink }
-export function encodeMessage({ id, from, to, re, kind = "task", body }) {
+export function encodeMessage({ id, from, to, re, kind, body }) {
     const pairs = [
         ["id", id],
         ["from", from],
@@ -151,7 +152,8 @@ export function parseComment(comment) {
         if (from && headers.get("kind") === "heartbeat") {
             return { ...base, type: "heartbeat", session: from };
         }
-        if (from && MESSAGE_ID.test(headers.get("id") ?? "")) {
+        const kind = headers.get("kind");
+        if (from && MESSAGE_ID.test(headers.get("id") ?? "") && MESSAGE_KINDS.has(kind)) {
             const to = [];
             for (const text of (headers.get("to") ?? "").split(",")) {
                 try {
@@ -168,7 +170,7 @@ export function parseComment(comment) {
                     from,
                     to,
                     re: parseRe(headers.get("re")),
-                    kind: headers.get("kind") === "notify" ? "notify" : "task",
+                    kind,
                     body,
                 };
             }
