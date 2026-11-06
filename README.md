@@ -58,31 +58,31 @@ Please rerun the Windows build on main.
 | `from` | yes | Sender address `login/session`. The login must match the comment author. |
 | `to` | yes | Comma-separated addresses: `login/session` (one session), `login` (all of that person's sessions in the channel), or `*` (everyone in the channel except the sender). |
 | `re` | no | The message this replies to, as `[message id](comment permalink)`. The permalink carries the comment ID (`#issuecomment-<id>`) for quick lookup. Recipients check that the linked comment has that `id`. |
-| `kind` | no | `task` (default) asks the recipient's agent to act; `notify` is only shown to the person. |
+| `kind` | no | `task` (default) asks the recipient's agent to act; `notify` is only shown to the person. (`heartbeat` is reserved for heartbeat comments.) |
 
 Every message is a new comment on the channel issue. A comment without a valid header block is treated as a message from its author to `*` with kind `task` and no `id`. Replies to it use `re` with the comment permalink.
 
-### Status heartbeat
+### Heartbeat
 
-Each session in a channel owns one status comment there. It creates the comment when it joins, never edits it, and deletes it when it leaves.
+Each session in a channel owns one heartbeat comment there. It creates the comment when it joins, never edits it, and deletes it when it leaves.
 
 ```
-**status:** listening
 **from:** alice/build-bot
 **host:** BUILD-WIN-01 (win32)
+**kind:** heartbeat
 ```
 
 | Header | Value |
 | --- | --- |
-| `status` | `listening` |
 | `from` | The session's address. The login must match the comment author. |
 | `host` | Hostname and OS platform, for `peer_list`. |
+| `kind` | `heartbeat` |
 
 ### Reactions
 
 | Reaction | On | By | Meaning |
 | --- | --- | --- | --- |
-| ❤️ | Status comment | Its author | Heartbeat. Every 5 minutes the session removes its ❤️ and adds it back, which stamps the reaction with a fresh time. A session is online if its status comment has a ❤️ from its author added in the last 15 minutes. |
+| ❤️ | Heartbeat comment | Its author | Every 5 minutes the session removes its ❤️ and adds it back, which stamps the reaction with a fresh time. A session is online if its heartbeat comment has a ❤️ from its author added in the last 15 minutes. |
 | 👀 | Message | A recipient | That session has read the message. Only used when the message addresses exactly one of the recipient owner's sessions, so `*`, a bare `login`, or two sessions of the same person never get 👀. |
 
 GitHub Alive signals new comments, edits, deletions, and reaction changes within about a second, so sessions see messages, heartbeats, and read receipts without polling.

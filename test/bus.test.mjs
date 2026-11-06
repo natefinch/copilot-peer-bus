@@ -80,7 +80,7 @@ async function inChannel(login, name, { sessionId = `${login}-${name}`, options 
     return handle;
 }
 
-const statusComments = () => fake.comments.filter((c) => parseComment({ ...c, user: { login: c.author } }).type === "status");
+const statusComments = () => fake.comments.filter((c) => parseComment({ ...c, user: { login: c.author } }).type === "heartbeat");
 const reactionsOn = (commentId, content) => fake.reactions.filter((r) => r.commentId === commentId && r.content === content);
 const lastComment = () => fake.comments.at(-1);
 
@@ -88,7 +88,7 @@ describe("joining", () => {
     test("posts a status comment with a heartbeat and mutes the issue", async () => {
         const mac = await inChannel("natefinch", "mac");
         const [status] = statusComments();
-        assert.equal(status.body, "**status:** listening\n**from:** natefinch/mac\n**host:** natefinch-host (testos)");
+        assert.equal(status.body, "**from:** natefinch/mac\n**host:** natefinch-host (testos)\n**kind:** heartbeat");
         assert.equal(reactionsOn(status.id, "heart").length, 1);
         assert.ok(fake.mutes.some((m) => m.login === "natefinch" && m.id === channel.node_id && m.state === "IGNORED"));
         assert.deepEqual(mac.bus.status().channels, [`"Release testing" (${channel.html_url})`]);
@@ -136,7 +136,7 @@ describe("joining", () => {
         const other = fake.addIssue("natefinch", "Other");
         await mac.bus.joinChannel(other.html_url);
         await mac.bus.join({ name: "laptop" });
-        assert.deepEqual(statusComments().map((c) => c.body.split("\n")[1]), ["**from:** natefinch/laptop", "**from:** natefinch/laptop"]);
+        assert.deepEqual(statusComments().map((c) => c.body.split("\n")[0]), ["**from:** natefinch/laptop", "**from:** natefinch/laptop"]);
 
         assert.match(await mac.bus.leaveChannel(other.html_url), /"Other"/);
         assert.equal(statusComments().length, 1);

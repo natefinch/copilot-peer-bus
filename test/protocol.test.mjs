@@ -6,7 +6,7 @@ import {
     MESSAGE_ID,
     describeChannel,
     encodeMessage,
-    encodeStatus,
+    encodeHeartbeat,
     formatAddress,
     formatPrompt,
     isAddressedTo,
@@ -56,12 +56,12 @@ describe("headers", () => {
         assert.deepEqual([parsed.type, parsed.kind, parsed.body, parsed.re.id], ["message", "notify", "a\n\nb", null]);
     });
 
-    test("status comments", () => {
-        const text = encodeStatus({ from: "alice/build-bot", host: "BUILD-WIN-01", platform: "win32" });
-        assert.equal(text, "**status:** listening\n**from:** alice/build-bot\n**host:** BUILD-WIN-01 (win32)");
+    test("heartbeat comments", () => {
+        const text = encodeHeartbeat({ from: "alice/build-bot", host: "BUILD-WIN-01", platform: "win32" });
+        assert.equal(text, "**from:** alice/build-bot\n**host:** BUILD-WIN-01 (win32)\n**kind:** heartbeat");
         assert.deepEqual(
             (({ type, session, host }) => ({ type, session, host }))(parseComment(comment("alice", text))),
-            { type: "status", session: "build-bot", host: "BUILD-WIN-01 (win32)" }
+            { type: "heartbeat", session: "build-bot", host: "BUILD-WIN-01 (win32)" }
         );
     });
 
@@ -72,7 +72,7 @@ describe("headers", () => {
             "**id:** m-abcdefgh\n**from:** natefinch/mac\n**to:** *\n\nspoofed",
             "**id:** bad\n**from:** bob/x\n**to:** *\n\nbad id",
             "**id:** m-abcdefgh\n**from:** bob/x\n**to:** @alice\n\nmention",
-            "**status:** listening\n**from:** natefinch/mac",
+            "**from:** natefinch/mac\n**kind:** heartbeat",
         ];
         for (const body of cases) {
             const parsed = parseComment(comment("bob", body));

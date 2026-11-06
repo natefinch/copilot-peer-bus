@@ -7,7 +7,7 @@ import {
     MESSAGE_ID,
     describeChannel,
     encodeMessage,
-    encodeStatus,
+    encodeHeartbeat,
     formatPrompt,
     isAddressedTo,
     issueKey,
@@ -122,7 +122,7 @@ export class PeerBus {
 
     // --- tools -----------------------------------------------------------------------------
 
-    // Sets (or changes) this session's name. Renaming replaces its status comments in every channel.
+    // Sets (or changes) this session's name. Renaming replaces its heartbeat comments in every channel.
     async join({ name }) {
         validateSessionName(name);
         const login = await this.github.login();
@@ -265,7 +265,7 @@ export class PeerBus {
         };
     }
 
-    // --- channels and status comments -------------------------------------------------------
+    // --- channels and heartbeat comments -------------------------------------------------------
 
     entryFor(ref) {
         const key = issueKey(ref);
@@ -299,12 +299,12 @@ export class PeerBus {
         };
     }
 
-    // Status comments in a channel, with whether each one's ❤️ heartbeat is fresh.
+    // Heartbeat comments in a channel, with whether each one's ❤️ heartbeat is fresh.
     async statuses(ref) {
         const result = [];
         for (const comment of await this.github.commentsWithHearts(ref)) {
             const parsed = parseComment(comment);
-            if (parsed.type !== "status") continue;
+            if (parsed.type !== "heartbeat") continue;
             const beats = comment.hearts.filter((h) => sameLogin(h.login, parsed.author)).map((h) => Date.parse(h.createdAt));
             const heartAt = beats.length ? Math.max(...beats) : null;
             result.push({ ...parsed, heartAt, fresh: heartAt !== null && this.now() - heartAt < this.staleMs });
@@ -312,7 +312,7 @@ export class PeerBus {
         return result;
     }
 
-    // Rejects a name another live session uses in this channel, and deletes this login's stale status comments for it.
+    // Rejects a name another live session uses in this channel, and deletes this login's stale heartbeat comments for it.
     async checkNameFree(ref, login, name) {
         const mine = this.entryFor(ref)?.statusCommentId;
         for (const status of await this.statuses(ref)) {
@@ -338,7 +338,7 @@ export class PeerBus {
                 entry.heartReactionId = null;
             }
         }
-        const comment = await this.github.createComment(entry, encodeStatus({ from: this.address, host: this.host, platform: this.platform }));
+        const comment = await this.github.createComment(entry, encodeHeartbeat({ from: this.address, host: this.host, platform: this.platform }));
         entry.statusCommentId = comment.id;
         entry.heartReactionId = null;
         this.save();
@@ -431,7 +431,7 @@ export class PeerBus {
                 throw new Error(`Can't find the comment ${text} to reply to.`);
             }
             const parsed = parseComment(comment);
-            if (parsed.type === "status") throw new Error("That's a status comment, not a message.");
+            if (parsed.type === "heartbeat") throw new Error("That's a heartbeat comment, not a message.");
             return { id: parsed.messageId, url: comment.html_url };
         }
         if (MESSAGE_ID.test(text)) {
@@ -455,7 +455,7 @@ export class PeerBus {
         if (known && COMMENT_URL.exec(known)?.[3] === String(re.commentId)) return;
         try {
             const target = parseComment(await this.github.getComment(re.repo, re.commentId));
-            if (target.type !== "status" && target.messageId === re.id) return;
+            if (target.type !== "heartbeat" && target.messageId === re.id) return;
             message.reNote = "its re header doesn't match the linked comment, so it was ignored";
         } catch {
             message.reNote = "its re header couldn't be checked, so it was ignored";
@@ -579,7 +579,7 @@ export class PeerBus {
         const incoming = [];
         for (const comment of fresh) {
             const message = parseComment(comment);
-            if (message.type === "status") continue;
+            if (message.type === "heartbeat") continue;
             this.rememberMessage(key, message.messageId, message.url);
             if (!message.body || !isAddressedTo(message, this.me)) continue;
             incoming.push({ ...message, channel: source.channel });

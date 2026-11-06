@@ -18,8 +18,8 @@ format is the [Schema section of the README](README.md#schema).
 | Concept | GitHub object |
 | --- | --- |
 | Channel | Any issue, referenced by its URL or `owner/repo#number`. Pull requests can't be channels. |
-| Membership | A status-heartbeat comment by the session in the channel issue. |
-| Liveness | The session's own ❤️ reaction on its status comment, re-added every 5 minutes. |
+| Membership | A heartbeat comment (`kind: heartbeat`) by the session in the channel issue. |
+| Liveness | The session's own ❤️ reaction on its heartbeat comment, re-added every 5 minutes. |
 | Message | A new comment with a header block (`id`, `from`, `to`, `re`, `kind`). |
 | Read receipt | 👀 from a recipient, for messages addressed to exactly one of its owner's sessions. |
 
@@ -65,11 +65,11 @@ higher latency.
 
 ## Presence
 
-Joining a channel posts the session's status comment and a ❤️ on it. Every 5 minutes the session
+Joining a channel posts the session's heartbeat comment and a ❤️ on it. Every 5 minutes the session
 removes its ❤️ and adds it back, so the reaction's `createdAt` shows it's still there. A session is
-online if its status comment has a ❤️ from the comment's author less than 15 minutes old. Status
+online if its heartbeat comment has a ❤️ from the comment's author less than 15 minutes old. Status
 comments are never edited: GitHub has no conditional comment updates (`If-Match` returns 400), so
-each comment has exactly one writer. Leaving deletes the status comment; a crashed session's heart
+each comment has exactly one writer. Leaving deletes the heartbeat comment; a crashed session's heart
 goes stale.
 
 A name already used by a session with a fresh heartbeat in the channel is rejected; a stale status

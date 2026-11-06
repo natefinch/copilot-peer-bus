@@ -70,7 +70,7 @@ const tools = [
     {
         name: "peer_channel_join",
         description:
-            "Join a peer-bus channel. A channel is a GitHub issue; this posts a status comment there and mutes the issue so bus " +
+            "Join a peer-bus channel. A channel is a GitHub issue; this posts a heartbeat comment there and mutes the issue so bus " +
             "traffic doesn't send you GitHub notifications. Messages in the channel addressed to this session, its owner, or * arrive here.",
         parameters: { type: "object", properties: { channel: { type: "string", description: CHANNEL_DESCRIPTION } }, required: ["channel"] },
         skipPermission: true,
@@ -104,7 +104,7 @@ const tools = [
     },
     {
         name: "peer_channel_leave",
-        description: "Leave a peer-bus channel. Deletes this session's status comment there.",
+        description: "Leave a peer-bus channel. Deletes this session's heartbeat comment there.",
         parameters: { type: "object", properties: { channel: { type: "string", description: CHANNEL_DESCRIPTION } }, required: ["channel"] },
         skipPermission: true,
         handler: async ({ channel }) => {

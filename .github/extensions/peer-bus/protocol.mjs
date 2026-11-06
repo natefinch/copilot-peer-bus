@@ -116,12 +116,12 @@ export function encodeMessage({ id, from, to, re, kind = "task", body }) {
     return `${headerBlock(pairs)}\n\n${body}`;
 }
 
-export function encodeStatus({ from, host, platform }) {
+export function encodeHeartbeat({ from, host, platform }) {
     const where = [host || "unknown host", platform ? `(${platform})` : ""].filter(Boolean).join(" ");
     return headerBlock([
-        ["status", "listening"],
         ["from", from],
         ["host", where],
+        ["kind", "heartbeat"],
     ]);
 }
 
@@ -139,7 +139,7 @@ function parseRe(value) {
 }
 
 // Parses an issue comment into one of:
-//   { type: "status", session, host }
+//   { type: "heartbeat", session, host }
 //   { type: "message", messageId, from, to, re, kind, body }
 //   { type: "human", from: null, to: [*], kind: "task", body }   (anything without a valid header block)
 export function parseComment(comment) {
@@ -150,8 +150,8 @@ export function parseComment(comment) {
     if (parsed) {
         const { headers, body } = parsed;
         const from = parseSender(headers.get("from"), author);
-        if (from && headers.get("status") === "listening") {
-            return { ...base, type: "status", session: from, host: headers.get("host") ?? "" };
+        if (from && headers.get("kind") === "heartbeat") {
+            return { ...base, type: "heartbeat", session: from, host: headers.get("host") ?? "" };
         }
         if (from && MESSAGE_ID.test(headers.get("id") ?? "")) {
             const to = [];
