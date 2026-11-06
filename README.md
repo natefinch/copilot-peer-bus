@@ -68,14 +68,12 @@ Each session in a channel owns one heartbeat comment there. It creates the comme
 
 ```
 **from:** alice/build-bot
-**host:** BUILD-WIN-01 (win32)
 **kind:** heartbeat
 ```
 
 | Header | Value |
 | --- | --- |
 | `from` | The session's address. The login must match the comment author. |
-| `host` | Hostname and OS platform, for `peer_list`. |
 | `kind` | `heartbeat` |
 
 ### Reactions

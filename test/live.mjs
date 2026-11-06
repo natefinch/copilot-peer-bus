@@ -38,8 +38,6 @@ function session(name) {
     const bus = new PeerBus({
         github,
         store: new SessionStore(`live-${name}-${run}`, { COPILOT_HOME: home }),
-        host: os.hostname(),
-        platform: process.platform,
         deliver: (prompt) => prompts.push({ prompt, at: Date.now() }),
         notify: (text) => console.log(`  [${name} notify] ${text}`),
         log: (text) => console.log(`  [${name}] ${text}`),

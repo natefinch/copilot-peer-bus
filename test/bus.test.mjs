@@ -57,8 +57,6 @@ function makeSession(login, sessionId, options = {}) {
     const bus = new PeerBus({
         github: new GitHub({ tokenProvider: async () => `tok-${login}`, apiUrl: fake.url }),
         store: new SessionStore(sessionId, { COPILOT_HOME: home }),
-        host: `${login}-host`,
-        platform: "testos",
         deliver: (prompt) => prompts.push(prompt),
         notify: (text) => notes.push(text),
         log: (text) => logs.push(text),
@@ -88,7 +86,7 @@ describe("joining", () => {
     test("posts a status comment with a heartbeat and mutes the issue", async () => {
         const mac = await inChannel("natefinch", "mac");
         const [status] = statusComments();
-        assert.equal(status.body, "**from:** natefinch/mac\n**host:** natefinch-host (testos)\n**kind:** heartbeat");
+        assert.equal(status.body, "**from:** natefinch/mac\n**kind:** heartbeat");
         assert.equal(reactionsOn(status.id, "heart").length, 1);
         assert.ok(fake.mutes.some((m) => m.login === "natefinch" && m.id === channel.node_id && m.state === "IGNORED"));
         assert.deepEqual(mac.bus.status().channels, [`"Release testing" (${channel.html_url})`]);
@@ -259,8 +257,8 @@ describe("presence", () => {
         const [listed] = await mac.bus.list();
         assert.equal(listed.label, `"Release testing" (${channel.html_url})`);
         assert.deepEqual(listed.sessions, [
-            { address: "alice/build", host: "alice-host (testos)", self: false },
-            { address: "natefinch/mac", host: "natefinch-host (testos)", self: true },
+            { address: "alice/build", self: false },
+            { address: "natefinch/mac", self: true },
         ]);
         const future = makeSession("bob", "observer", { now: () => Date.now() + 60 * 60_000 });
         await future.bus.join({ name: "observer" });

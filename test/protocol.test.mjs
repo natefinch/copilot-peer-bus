@@ -57,11 +57,11 @@ describe("headers", () => {
     });
 
     test("heartbeat comments", () => {
-        const text = encodeHeartbeat({ from: "alice/build-bot", host: "BUILD-WIN-01", platform: "win32" });
-        assert.equal(text, "**from:** alice/build-bot\n**host:** BUILD-WIN-01 (win32)\n**kind:** heartbeat");
+        const text = encodeHeartbeat({ from: "alice/build-bot" });
+        assert.equal(text, "**from:** alice/build-bot\n**kind:** heartbeat");
         assert.deepEqual(
-            (({ type, session, host }) => ({ type, session, host }))(parseComment(comment("alice", text))),
-            { type: "heartbeat", session: "build-bot", host: "BUILD-WIN-01 (win32)" }
+            (({ type, session }) => ({ type, session }))(parseComment(comment("alice", text))),
+            { type: "heartbeat", session: "build-bot" }
         );
     });
 

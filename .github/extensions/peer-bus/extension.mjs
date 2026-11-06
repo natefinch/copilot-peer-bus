@@ -1,8 +1,6 @@
 // Copilot session extension: lets sessions on different machines and of different people message each other
 // through GitHub issues used as channels, with GitHub Alive pushing new messages. See README.md.
 
-import os from "node:os";
-
 import { joinSession } from "@github/copilot-sdk/extension";
 
 import { AliveWatcher } from "./alive.mjs";
@@ -23,8 +21,6 @@ function log(text, level = "info") {
 const bus = new PeerBus({
     github: new GitHub({ apiUrl: env.PEER_BUS_API_URL || undefined }),
     store: new SessionStore(env.SESSION_ID ?? "unknown-session"),
-    host: os.hostname(),
-    platform: process.platform,
     deliver: (prompt) => session.send({ prompt }).catch((e) => log(`could not deliver a message: ${e.message}`, "error")),
     notify: (text) => session.log(text, { level: "info" }).catch(() => {}),
     log,
@@ -126,7 +122,7 @@ const tools = [
             if (channels.length === 0) lines.push("Not in any channels.");
             for (const c of channels) {
                 lines.push(`${c.label}${c.joined ? "" : " (not joined)"}:`);
-                lines.push(...(c.sessions.length ? c.sessions.map((s) => `- ${s.address}${s.self ? " (this session)" : ""}: ${s.host || "?"}`) : ["- no one listening"]));
+                lines.push(...(c.sessions.length ? c.sessions.map((s) => `- ${s.address}${s.self ? " (this session)" : ""}`) : ["- no one listening"]));
             }
             return lines.join("\n");
         },

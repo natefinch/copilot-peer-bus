@@ -103,8 +103,7 @@ test("extension: join, create a channel, message by URL, reply, and rejoin after
 
     const list = await mac.call("peer_list");
     assert.match(list, /This session: natefinch\/mac · push polling/);
-    assert.match(list, /- natefinch\/mac \(this session\): \S+ \(\w+\)/);
-    assert.match(list, /- natefinch\/win: /);
+    assert.match(list, /- natefinch\/mac \(this session\)\n- natefinch\/win$/);
 
     const sent = await mac.call("peer_send", { channel: url, to: "natefinch/win", message: "please run the test suite" });
     const [, id, commentUrl] = /^Sent (m-[a-z0-9]{8}): (\S+)$/.exec(sent);

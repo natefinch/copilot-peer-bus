@@ -50,8 +50,6 @@ export class PeerBus {
     constructor({
         github,
         store,
-        host = "",
-        platform = "",
         deliver,
         notify,
         log = () => {},
@@ -62,7 +60,7 @@ export class PeerBus {
         staleMs = 15 * 60_000,
         now = () => Date.now(),
     }) {
-        Object.assign(this, { github, store, host, platform, deliver, notify, log, createAlive });
+        Object.assign(this, { github, store, deliver, notify, log, createAlive });
         Object.assign(this, { pollMs, fallbackPollMs, heartbeatMs, staleMs, now });
         this.state = null;
         this.me = null;
@@ -238,7 +236,7 @@ export class PeerBus {
         for (const target of targets) {
             const sessions = (await this.statuses(target))
                 .filter((s) => s.fresh)
-                .map((s) => ({ address: `${s.author}/${s.session}`, host: s.host, self: s.commentId === this.entryFor(target)?.statusCommentId }))
+                .map((s) => ({ address: `${s.author}/${s.session}`, self: s.commentId === this.entryFor(target)?.statusCommentId }))
                 .sort((a, b) => a.address.localeCompare(b.address));
             result.push({ label: describeChannel(target), url: issueUrl(target), joined: Boolean(this.entryFor(target)), sessions });
         }
@@ -319,7 +317,7 @@ export class PeerBus {
             if (!sameLogin(status.author, login) || !sameSession(status.session, name) || status.commentId === mine) continue;
             if (status.fresh) {
                 throw new Error(
-                    `Another session is already listening in ${describeChannel(ref)} as ${login}/${status.session} (${status.host || "unknown host"}). Pick a different name with peer_join.`
+                    `Another session is already listening in ${describeChannel(ref)} as ${login}/${status.session}. Pick a different name with peer_join.`
                 );
             }
             await this.github.deleteComment(ref.repo, status.commentId).catch(() => {});
@@ -338,7 +336,7 @@ export class PeerBus {
                 entry.heartReactionId = null;
             }
         }
-        const comment = await this.github.createComment(entry, encodeHeartbeat({ from: this.address, host: this.host, platform: this.platform }));
+        const comment = await this.github.createComment(entry, encodeHeartbeat({ from: this.address }));
         entry.statusCommentId = comment.id;
         entry.heartReactionId = null;
         this.save();
