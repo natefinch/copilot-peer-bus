@@ -114,9 +114,19 @@ Messages are rejected before posting if the full comment, headers included, exce
 New comments notify an issue's subscribers and the repository's watchers; edits and reactions
 don't. Joining or creating a channel mutes the issue for the user (GraphQL `updateSubscription`,
 `IGNORED`, falling back to `UNSUBSCRIBED`), and the extension re-mutes after each comment it posts,
-since commenting can resubscribe the author. Muting needs the `notifications` OAuth scope, which
-`gh` tokens don't have by default, so joining, creating, and sending fail with instructions until
-the user runs `gh auth refresh -h github.com -s notifications`.
+since commenting can resubscribe the author.
+
+Muting needs the `notifications` OAuth scope, which `gh` tokens don't have by default. When a session
+starts, and when joining, creating, or sending finds the scope missing, the extension offers (with a
+confirm dialog) to add it. On yes it runs `gh auth refresh -h github.com -s notifications`, or
+`gh auth login ... --web` if gh has no stored login, with `GH_TOKEN` and `GITHUB_TOKEN` removed from
+its environment, since gh won't refresh while they're set. Without a terminal, gh prints a one-time
+code and the device URL instead of prompting, so the extension opens the URL, shows the code in the
+session, waits for gh to save the new token, and rereads it; a tool waiting on the scope then
+continues. Concurrent requests share one offer. If the person declines (or dismisses the dialog),
+the extension records `declinedScopeOffer` in `$COPILOT_HOME/peer-bus/settings.json`, shared by all
+the person's sessions, and never offers again; then, as when the host can't show dialogs, operations
+needing the scope fail with instructions to run the command themselves.
 
 Muting only covers participants. People watching the repository who aren't in the channel are
 still notified.

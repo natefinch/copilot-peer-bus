@@ -36,8 +36,8 @@ const RECEIPT_TTL_MS = 24 * 60 * 60_000;
 const ABOUT = /^(https:\/\/github\.com\/\S+|[A-Za-z0-9-]+\/[A-Za-z0-9._-]+#\d+)$/;
 export const MUTE_HELP =
     "The peer bus mutes each channel issue so bus messages don't send GitHub notifications, which needs the GitHub CLI's " +
-    "notifications scope. Run `gh auth refresh -h github.com -s notifications` in a terminal where GH_TOKEN and " +
-    "GITHUB_TOKEN aren't set (gh won't refresh while they are), then try again.";
+    "notifications scope. Accept peer-bus's offer to add it, or run `gh auth refresh -h github.com -s notifications` in a " +
+    "terminal where GH_TOKEN and GITHUB_TOKEN aren't set (gh won't refresh while they are), then try again.";
 
 const truncate = (text, max) => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
 const repoFromUrl = (url) => /^https:\/\/[^/]+\/([^/]+\/[^/]+)\/issues\/\d+/.exec(url ?? "")?.[1];
@@ -60,6 +60,8 @@ export class PeerBus {
         deliver,
         notify,
         log = () => {},
+        // Offers to add the notifications scope; resolves to whether the person did.
+        requestScope = async () => false,
         createAlive = (options) => new AliveWatcher(options),
         pollMs = 60_000,
         fallbackPollMs = 10_000,
@@ -67,7 +69,7 @@ export class PeerBus {
         staleMs = 15 * 60_000,
         now = () => Date.now(),
     }) {
-        Object.assign(this, { github, store, deliver, notify, log, createAlive });
+        Object.assign(this, { github, store, deliver, notify, log, requestScope, createAlive });
         Object.assign(this, { pollMs, fallbackPollMs, heartbeatMs, staleMs, now });
         this.state = null;
         this.me = null;
@@ -441,6 +443,8 @@ export class PeerBus {
         if (this.hasMuteScope()) return;
         // The person may have run `gh auth refresh -s notifications` since the token was read.
         await this.github.reauthenticate();
+        if (this.hasMuteScope()) return;
+        if (await this.requestScope()) await this.github.reauthenticate();
         if (!this.hasMuteScope()) throw new Error(MUTE_HELP);
     }
 

@@ -38,7 +38,7 @@ function waitFor(predicate, timeoutMs = 5000) {
     });
 }
 
-async function launchExtension(sessionId, login) {
+async function launchExtension(sessionId, login, extraEnv = {}) {
     const { PEER_BUS_GITHUB_TOKEN: _t, ...baseEnv } = process.env;
     const child = fork(path.join(root, ".github", "extensions", "peer-bus", "extension.mjs"), {
         execArgv: ["--import", path.join(root, "test", "fixtures", "register-fake-sdk.mjs")],
@@ -50,6 +50,7 @@ async function launchExtension(sessionId, login) {
             PEER_BUS_GITHUB_TOKEN: `tok-${login}`,
             PEER_BUS_ALIVE: "0",
             PEER_BUS_FALLBACK_POLL_MS: "100",
+            ...extraEnv,
         },
         stdio: ["ignore", "inherit", "inherit", "ipc"],
     });
@@ -138,4 +139,23 @@ test("extension: join, create a channel, message by URL, reply, and rejoin after
     assert.match(await winAgain.call("peer_leave"), /Left the peer bus \(was natefinch\/win\)/);
     await waitFor(() => mac.events.some((e) => e.type === "log" && /👋 natefinch\/win left/.test(e.message)));
     assert.doesNotMatch(await mac.call("peer_list"), /natefinch\/win/);
+});
+
+test("extension: offers to add the notifications scope, and never again once declined", async () => {
+    await fake.close();
+    fake = createFakeGitHub({ scopes: "repo, read:org" });
+    await fake.listen();
+
+    const first = await launchExtension("session-one", "natefinch", { FAKE_SDK_CONFIRM: "no" });
+    await waitFor(() => first.events.some((e) => e.type === "log" && /won't ask again/.test(e.message)));
+    assert.equal(first.events.filter((e) => e.type === "confirm").length, 1);
+    await first.call("peer_join", { name: "one" });
+    assert.match(failure(await first.call("peer_channel_create", { title: "x", repo: "acme/channels" })), /notifications scope/);
+    assert.equal(first.events.filter((e) => e.type === "confirm").length, 1, "a tool doesn't ask again after a decline");
+
+    // PATH hides gh, so a regression that asks anyway can't start a real sign-in.
+    const second = await launchExtension("session-two", "natefinch", { FAKE_SDK_CONFIRM: "yes", PATH: "" });
+    await second.call("peer_join", { name: "two" });
+    assert.match(failure(await second.call("peer_channel_create", { title: "x", repo: "acme/channels" })), /notifications scope/);
+    assert.equal(second.events.filter((e) => e.type === "confirm").length, 0, "another session doesn't ask either");
 });

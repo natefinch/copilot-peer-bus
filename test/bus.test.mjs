@@ -128,6 +128,24 @@ describe("joining", () => {
         assert.equal(statusComments().length, 1);
     });
 
+    test("offers to add the notifications scope and continues once the person does", async () => {
+        await startFake({ scopes: "repo, read:org", tokenScopes: { "tok-natefinch:refreshed": "repo, notifications" } });
+        let token = "tok-natefinch";
+        let offers = 0;
+        const mac = makeSession("natefinch", "mac", {
+            github: new GitHub({ tokenProvider: async () => token, apiUrl: fake.url }),
+            requestScope: async () => {
+                offers++;
+                token = "tok-natefinch:refreshed";
+                return true;
+            },
+        });
+        await mac.bus.join({ name: "mac" });
+        await mac.bus.joinChannel(channel.html_url);
+        assert.equal(offers, 1);
+        assert.equal(statusComments().length, 1);
+    });
+
     test("a fresh duplicate name is rejected; a stale one is replaced", async () => {
         await inChannel("natefinch", "mac", { sessionId: "one" });
         const two = makeSession("natefinch", "two");

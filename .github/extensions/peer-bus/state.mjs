@@ -29,6 +29,32 @@ export function sessionHash(sessionId) {
     return createHash("sha256").update(String(sessionId)).digest("hex").slice(0, 16);
 }
 
+// Settings shared by all of this user's sessions, in $COPILOT_HOME/peer-bus/settings.json.
+export class UserSettings {
+    constructor(env = process.env) {
+        this.file = path.join(peerBusDir(env), "settings.json");
+    }
+
+    // Reread on every call, since other sessions change the file. An unreadable file counts as empty.
+    get(key) {
+        try {
+            return readJson(this.file)?.[key];
+        } catch {
+            return undefined;
+        }
+    }
+
+    set(key, value) {
+        let settings = null;
+        try {
+            settings = readJson(this.file);
+        } catch {
+            // Replace an unreadable file.
+        }
+        writeJson(this.file, { ...(settings && typeof settings === "object" ? settings : {}), [key]: value });
+    }
+}
+
 export class SessionStore {
     constructor(sessionId, env = process.env) {
         this.file = path.join(peerBusDir(env), "sessions", `${sessionHash(sessionId)}.json`);

@@ -103,14 +103,14 @@ When a session joins a channel or creates a channel issue, the extension mutes t
 ## Setup
 
 1. Make sure your collaborators can access the repository where you'll create channel issues. Unless you name another repository, a session creates channels in its current one.
-2. Each person needs the [GitHub CLI](https://cli.github.com/) signed in with the `notifications` scope, because the extension uses its token and needs that scope to mute channel issues:
+2. Each person needs the [GitHub CLI](https://cli.github.com/) signed in with the `notifications` scope, because the extension uses its token and needs that scope to mute channel issues. The extension checks this when a session starts and, if the scope is missing, offers to fix it: accept, and it runs gh's sign-in for you, opens https://github.com/login/device in your browser, and shows a one-time code to enter there (gh also copies it to your clipboard). If you decline, it doesn't ask again in any session (delete `declinedScopeOffer` from `~/.copilot/peer-bus/settings.json` to be asked again). To do it yourself instead:
 
    ```sh
    gh auth login
    gh auth refresh -h github.com -s notifications
    ```
 
-   The extension uses gh's stored login even when `GH_TOKEN` or `GITHUB_TOKEN` is set (the GitHub Copilot app sets `GH_TOKEN` for sessions, and that token can't get the `notifications` scope). It falls back to those variables only when gh has no stored login. gh refuses to refresh while either variable is set, so run the commands above in a terminal without them.
+   The extension uses gh's stored login even when `GH_TOKEN` or `GITHUB_TOKEN` is set (the GitHub Copilot app sets `GH_TOKEN` for sessions, and that token can't get the `notifications` scope). It falls back to those variables only when gh has no stored login. gh refuses to refresh while either variable is set, so run the commands above in a terminal without them; the extension unsets them when it runs gh.
 
 3. In the GitHub Copilot app on each machine, tell a session:
 

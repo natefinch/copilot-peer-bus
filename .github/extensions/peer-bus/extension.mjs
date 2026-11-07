@@ -8,10 +8,11 @@ import { fileURLToPath } from "node:url";
 import { joinSession } from "@github/copilot-sdk/extension";
 
 import { AliveWatcher } from "./alive.mjs";
+import { openInBrowser, startScopeFlow } from "./auth.mjs";
 import { PeerBus } from "./bus.mjs";
 import { GitHub } from "./github.mjs";
 import { SESSION_NAME } from "./protocol.mjs";
-import { SessionStore } from "./state.mjs";
+import { SessionStore, UserSettings } from "./state.mjs";
 import { SOURCE_URL, Updater, fileShas, isProjectCopy } from "./update.mjs";
 
 const env = process.env;
@@ -48,12 +49,83 @@ const bus = new PeerBus({
     deliver: (prompt) => session.send({ prompt }).catch((e) => log(`could not deliver a message: ${e.message}`, "error")),
     notify: (text) => session.log(text, { level: "info" }).catch(() => {}),
     log,
+    requestScope: () => offerNotificationsScope(),
     createAlive: (options) => new AliveWatcher({ ...options, WebSocketImpl: env.PEER_BUS_ALIVE === "0" ? undefined : globalThis.WebSocket }),
     pollMs: positive(env.PEER_BUS_POLL_MS, 60_000),
     fallbackPollMs: positive(env.PEER_BUS_FALLBACK_POLL_MS, 10_000),
 });
 
 const CHANNEL_DESCRIPTION = "Channel issue URL (https://github.com/owner/repo/issues/123) or owner/repo#123.";
+
+const SCOPE_OFFER =
+    "peer-bus needs your GitHub CLI login to have the notifications scope, so it can mute channel issues and bus " +
+    "messages don't send you GitHub notifications. Sign in again now to add it? You'll enter a one-time code in your browser.";
+
+let scopeOffer = null;
+const settings = new UserSettings();
+const DECLINED = "declinedScopeOffer";
+
+// Offers to add the notifications scope with gh's device flow; resolves to whether the token has it afterwards.
+// Concurrent callers (the startup check and tools) share one offer. Once the person declines, in any session,
+// it never asks again.
+function offerNotificationsScope() {
+    scopeOffer ??= runScopeOffer().finally(() => (scopeOffer = null));
+    return scopeOffer;
+}
+
+async function runScopeOffer() {
+    if (!session?.capabilities?.ui?.elicitation || settings.get(DECLINED)) return false;
+    if (!(await session.ui.confirm(SCOPE_OFFER))) {
+        settings.set(DECLINED, true);
+        await session
+            .log(
+                "peer-bus won't ask again. To add the scope later, run `gh auth refresh -h github.com -s notifications` in a " +
+                    "terminal where GH_TOKEN and GITHUB_TOKEN aren't set.",
+                { level: "info" },
+            )
+            .catch(() => {});
+        return false;
+    }
+    try {
+        // Another session may have added the scope while the dialog was open.
+        if (await hasScope()) return true;
+        const { code, url, copied, done } = await startScopeFlow();
+        openInBrowser(url);
+        await session.log(
+            `peer-bus: enter the code ${code} at ${url}${copied ? " (gh copied it to your clipboard)" : ""} to add the notifications scope.`,
+            { level: "warning" },
+        );
+        await done;
+        const added = await hasScope();
+        await session.log(added ? "peer-bus: ✅ the GitHub CLI login now has the notifications scope." : "peer-bus: gh finished, but its login still lacks the notifications scope.", {
+            level: added ? "info" : "warning",
+        });
+        return added;
+    } catch (error) {
+        await session.log(`peer-bus: could not add the notifications scope: ${error.message}`, { level: "warning" }).catch(() => {});
+        return false;
+    }
+}
+
+// Rereads the token and reports whether it has the notifications scope (true when GitHub doesn't say).
+async function hasScope() {
+    try {
+        await github.reauthenticate();
+    } catch (error) {
+        if (error.noToken) return false;
+        throw error;
+    }
+    return bus.hasMuteScope();
+}
+
+// Tests the current login at startup and offers to fix a missing notifications scope.
+async function checkScope() {
+    try {
+        if (!(await hasScope())) await offerNotificationsScope();
+    } catch (error) {
+        log(`could not check the GitHub CLI login: ${error.message}`, "warning");
+    }
+}
 
 // The app replaces a thrown error's message with "Tool execution failed", hiding instructions such as how
 // to add the notifications scope. Returning the failure as a result lets the agent read and relay it.
@@ -248,6 +320,8 @@ try {
 } catch (error) {
     log(`could not start: ${error.message}`, "warning");
 }
+
+checkScope();
 
 if (env.PEER_BUS_AUTO_UPDATE !== "0" && !isProjectCopy(extensionDir)) {
     updater.start(positive(env.PEER_BUS_UPDATE_CHECK_MS, 60 * 60_000), (error) => log(`could not check for updates: ${error.message}`));

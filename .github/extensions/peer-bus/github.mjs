@@ -13,8 +13,15 @@ export class GitHubError extends Error {
 
 const ENV_TOKENS = ["GH_TOKEN", "GITHUB_TOKEN"];
 
+// env without GH_TOKEN and GITHUB_TOKEN, so gh uses (and refreshes) its stored login.
+export function withoutEnvTokens(env) {
+    const stripped = { ...env };
+    for (const name of ENV_TOKENS) delete stripped[name];
+    return stripped;
+}
+
 // Resolves to the token `gh auth token` prints with the given environment, or null if it has none.
-function ghAuthToken(env) {
+export function ghAuthToken(env) {
     return new Promise((resolve) => {
         execFile("gh", ["auth", "token", "--hostname", "github.com"], { env, timeout: 10_000 }, (error, stdout) => {
             resolve((!error && stdout?.trim()) || null);
@@ -26,10 +33,12 @@ function ghAuthToken(env) {
 // sessions to a token that lacks the notifications scope. So read the stored login, which is the one
 // `gh auth refresh -s notifications` updates, and fall back to the environment token only without one.
 export async function ghCliToken({ env = process.env, run = ghAuthToken } = {}) {
-    const storedEnv = { ...env };
-    for (const name of ENV_TOKENS) delete storedEnv[name];
-    const token = (await run(storedEnv)) ?? (ENV_TOKENS.some((name) => env[name]) ? await run(env) : null);
-    if (!token) throw new Error("Could not get a GitHub token from the GitHub CLI. Install gh and run `gh auth login`.");
+    const token = (await run(withoutEnvTokens(env))) ?? (ENV_TOKENS.some((name) => env[name]) ? await run(env) : null);
+    if (!token) {
+        const error = new Error("Could not get a GitHub token from the GitHub CLI. Install gh and run `gh auth login`.");
+        error.noToken = true;
+        throw error;
+    }
     return token;
 }
 
